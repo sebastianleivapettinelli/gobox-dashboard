@@ -114,6 +114,10 @@
             periodo: 'ultimo',
             maquinaFiltro: 'todas',
             analiticaVerTodos: false,
+            showInvModal: false,
+            invPreview: null,
+            invLoading: false,
+            invError: '',
             showImportModal: false,
             importPreview: null,
             importLoading: false,
@@ -270,6 +274,17 @@
             return caps;
         }
 
+        // Capacidad por espacio: se guarda en maquinas.capacidad_por_espacio como JSON {"1": 8, "3": 8, "11": 12, ...}
+        function getCapacidades(maquina) {
+            let c = maquina ? maquina.capacidad_por_espacio : null;
+            if (typeof c === 'string') { try { c = JSON.parse(c || '{}'); } catch (e) { c = {}; } }
+            return (c && typeof c === 'object' && !Array.isArray(c)) ? c : {};
+        }
+        function capacidadEspacio(maquina, espacio) {
+            const n = parseInt(getCapacidades(maquina)[normEspacio(espacio)], 10);
+            return n > 0 ? n : null;
+        }
+
         // Serial sin ceros a la izquierda: '0000000000440864' → '440864', '0' → '0'
         function normSerial(v) {
             const t = String(v ?? '').trim();
@@ -308,7 +323,7 @@
         }
 
         function emptyAssignment() {
-            return { maquina_id: '', espacio: '', sku: '', cantidad_asignada: 1, productos_por_slot: 1 };
+            return { maquina_id: '', espacio: '', sku: '', cantidad_asignada: 0, productos_por_slot: 1, capacidad: '' };
         }
 
         state.newMachine = emptyMachine();
@@ -672,7 +687,8 @@
                 maquina_id: machineId,
                 espacio: espacio,
                 sku: assignment ? assignment.sku : '',
-                cantidad_asignada: assignment ? assignment.cantidad_asignada : 1,
+                cantidad_asignada: assignment ? (Number(assignment.cantidad_asignada) || 0) : 0,
+                capacidad: capacidadEspacio(maquina, espacio) || '',
                 // Antes no se inicializaba → "Slots ocupados: NaN" y se guardaba undefined
                 productos_por_slot: (assignment && assignment.productos_por_slot) || (maquina && maquina.productos_por_slot) || 1
             };
@@ -688,7 +704,12 @@
         };
 
         window.updateAssignmentField = function(field, value) {
-            if (field === 'cantidad_asignada' || field === 'productos_por_slot') {
+            if (field === 'cantidad_asignada') {
+                state.newAssignment[field] = Math.max(0, parseInt(value) || 0);
+            } else if (field === 'capacidad') {
+                const n = parseInt(value, 10);
+                state.newAssignment.capacidad = n > 0 ? n : '';
+            } else if (field === 'productos_por_slot') {
                 state.newAssignment[field] = Math.max(1, parseInt(value) || 1);
             } else {
                 state.newAssignment[field] = value;
@@ -709,7 +730,21 @@
                 return;
             }
 
+            const capNueva = parseInt(state.newAssignment.capacidad, 10) || null;
+            if (capNueva && state.newAssignment.cantidad_asignada > capNueva) {
+                alert(`⚠️ La cantidad (${state.newAssignment.cantidad_asignada}) supera la capacidad del espacio (${capNueva}).`);
+                return;
+            }
             try {
+                // Capacidad del espacio → se guarda en la máquina
+                const maq = state.maquinas.find(m => String(m.id) === String(state.newAssignment.maquina_id));
+                if (maq && capNueva !== capacidadEspacio(maq, state.newAssignment.espacio)) {
+                    const caps = getCapacidades(maq);
+                    if (capNueva) caps[normEspacio(state.newAssignment.espacio)] = capNueva; else delete caps[normEspacio(state.newAssignment.espacio)];
+                    const { error: errCap } = await supabaseClient.from('maquinas').update({ capacidad_por_espacio: JSON.stringify(caps) }).eq('id', maq.id);
+                    if (errCap) { alert('❌ Error al guardar la capacidad: ' + errCap.message); return; }
+                    maq.capacidad_por_espacio = JSON.stringify(caps);
+                }
                 const existingAssignment = getAsignacion(state.newAssignment.maquina_id, state.newAssignment.espacio);
 
                 if (existingAssignment) {
@@ -718,7 +753,8 @@
                         espacio: normEspacio(state.newAssignment.espacio),
                         sku: state.newAssignment.sku,
                         cantidad_asignada: state.newAssignment.cantidad_asignada,
-                        precio_venta_espacio: product.precio_venta_unitario,
+                        fecha_asignacion: fechaLocal(),
+                        precio_venta_espacio: existingAssignment.sku === state.newAssignment.sku && Number(existingAssignment.precio_venta_espacio) > 0 ? existingAssignment.precio_venta_espacio : product.precio_venta_unitario,
                         productos_por_slot: state.newAssignment.productos_por_slot
                     }).eq('id', existingAssignment.id);
 
@@ -739,6 +775,7 @@
                         espacio: normEspacio(state.newAssignment.espacio),
                         sku: state.newAssignment.sku,
                         cantidad_asignada: state.newAssignment.cantidad_asignada,
+                        fecha_asignacion: fechaLocal(),
                         precio_venta_espacio: product.precio_venta_unitario,
                         productos_por_slot: state.newAssignment.productos_por_slot
                     }]);
@@ -1034,7 +1071,8 @@
                 state.machineConfig = {
                     filas: machine.total_filas || 6,
                     columnas: machine.total_columnas || 10,
-                    productoPorSlot: machine.productos_por_slot || 1
+                    productoPorSlot: machine.productos_por_slot || 1,
+                    capacidades: { ...getCapacidades(machine) }
                 };
                 render();
             }
@@ -1052,18 +1090,51 @@
         window.increaseProductos = function() { state.machineConfig.productoPorSlot++; render(); };
         window.decreaseProductos = function() { if (state.machineConfig.productoPorSlot > 1) state.machineConfig.productoPorSlot--; render(); };
 
+        // Capacidad de un espacio en la pantalla de configuración (sin redibujar para no perder el foco)
+        window.setCapacidadConfig = function(espacio, valor) {
+            const n = parseInt(valor, 10);
+            if (n > 0) state.machineConfig.capacidades[espacio] = Math.min(n, 99);
+            else delete state.machineConfig.capacidades[espacio];
+            const tot = document.getElementById('capTotal');
+            if (tot) tot.textContent = totalCapacidadConfig();
+        };
+        // Misma capacidad para toda una bandeja
+        window.llenarBandeja = function(bandeja, valor) {
+            const n = parseInt(valor, 10);
+            for (let c = 1; c <= state.machineConfig.columnas; c++) {
+                const e = codigoEspacio(bandeja, c);
+                if (n > 0) state.machineConfig.capacidades[e] = Math.min(n, 99); else delete state.machineConfig.capacidades[e];
+            }
+            render();
+        };
+        function totalCapacidadConfig() {
+            let t = 0;
+            for (let f = 1; f <= state.machineConfig.filas; f++)
+                for (let c = 1; c <= state.machineConfig.columnas; c++)
+                    t += parseInt(state.machineConfig.capacidades[codigoEspacio(f, c)], 10) || 0;
+            return t;
+        }
+
         window.saveMachineConfig = async function() {
             if (!puedeEscribir()) return;
+            // Solo se guardan capacidades de espacios que existen en la grilla actual
+            const caps = {};
+            for (let f = 1; f <= state.machineConfig.filas; f++)
+                for (let c = 1; c <= state.machineConfig.columnas; c++) {
+                    const e = codigoEspacio(f, c);
+                    const n = parseInt(state.machineConfig.capacidades[e], 10);
+                    if (n > 0) caps[e] = n;
+                }
             const { error } = await supabaseClient.from('maquinas').update({
                 total_filas: state.machineConfig.filas,
                 total_columnas: state.machineConfig.columnas,
                 total_espacios: state.machineConfig.filas * state.machineConfig.columnas,
-                productos_por_slot: state.machineConfig.productoPorSlot
+                capacidad_por_espacio: JSON.stringify(caps)
             }).eq('id', state.editingMachine);
 
-            if (error) { console.error('Error saving:', error); alert('Error al guardar'); }
+            if (error) { console.error('Error saving:', error); alert('❌ Error al guardar: ' + error.message); }
             else { 
-                guardarHistorial('ACTUALIZAR_CONFIG_MAQUINA', `ID: ${state.editingMachine}`);
+                guardarHistorial('ACTUALIZAR_CONFIG_MAQUINA', `ID: ${state.editingMachine} · ${Object.keys(caps).length} espacios con capacidad (${Object.values(caps).reduce((a, b) => a + b, 0)} unidades)`);
                 alert('✅ Configuración guardada'); 
                 state.editingMachine = null; 
                 await fetchMaquinas(); 
@@ -1769,6 +1840,251 @@
         }
 
         // ============================================
+        // PLANILLA DE INVENTARIO (descargar → completar en Excel → cargar)
+        // ============================================
+        function nombreHoja(nombre, usados) {
+            let n = String(nombre || 'Máquina').replace(/[\[\]:*?\/\\]/g, ' ').trim().substring(0, 31) || 'Máquina';
+            let k = 2; const base = n;
+            while (usados.has(n)) n = (base.substring(0, 28) + ' ' + k++);
+            usados.add(n); return n;
+        }
+
+        window.descargarPlanillaInventario = async function() {
+            try {
+                await asegurarSheetJS();
+                const wb = XLSX.utils.book_new();
+                const usados = new Set(['Instrucciones', 'Bodega']);
+                const instr = [
+                    ['PLANILLA DE INVENTARIO GO BOX'],
+                    [`Generada el ${fmtFecha(fechaLocal())} por ${state.currentUser}`],
+                    [],
+                    ['Cómo usarla'],
+                    ['1. Hoja "Bodega": completa Stock bodega (unidades), y si quieres Precio compra, Precio venta, Fecha caducidad (AAAA-MM-DD) y Proveedor.'],
+                    ['2. Hoja de cada máquina: completa Capacidad (cuánto cabe en la espiral) y Cantidad actual (cuántas unidades hay hoy).'],
+                    ['3. No cambies las columnas SKU, Espacio ni los títulos. Deja en blanco lo que no quieras modificar.'],
+                    ['4. Para agregar un producto nuevo a bodega: agrega una fila al final de "Bodega" con SKU, Producto, Familia y Stock.'],
+                    ['5. En el dashboard: Inventario → Cargar planilla. Antes de guardar verás un resumen de los cambios.'],
+                    [],
+                    ['Familias válidas: Snacks, Bebidas, Confites, Dulces, Proteína (u otra que ya uses)'],
+                ];
+                const wsI = XLSX.utils.aoa_to_sheet(instr); wsI['!cols'] = [{ wch: 120 }];
+                XLSX.utils.book_append_sheet(wb, wsI, 'Instrucciones');
+
+                const enMaquinas = {};
+                state.asignaciones.forEach(a => { enMaquinas[a.sku] = (enMaquinas[a.sku] || 0) + (Number(a.cantidad_asignada) || 0); });
+                const bod = [['SKU', 'Producto', 'Familia', 'Stock bodega', 'Precio compra', 'Precio venta', 'Fecha caducidad (AAAA-MM-DD)', 'Proveedor', 'En máquinas (referencia)']];
+                state.inventario.slice()
+                    .sort((a, b) => String(a.familia).localeCompare(String(b.familia)) || String(a.nombre_producto).localeCompare(String(b.nombre_producto)))
+                    .forEach(p => bod.push([p.sku, p.nombre_producto, p.familia, Number(p.cantidad_actual) || 0, Number(p.precio_compra_unitario) || 0,
+                        Number(p.precio_venta_unitario) || 0, p.fecha_caducidad ? String(p.fecha_caducidad).substring(0, 10) : '', p.proveedor || '', enMaquinas[p.sku] || 0]));
+                const wsB = XLSX.utils.aoa_to_sheet(bod);
+                wsB['!cols'] = [{ wch: 30 }, { wch: 34 }, { wch: 12 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 26 }, { wch: 22 }, { wch: 22 }];
+                XLSX.utils.book_append_sheet(wb, wsB, 'Bodega');
+
+                state.maquinas.slice().sort((a, b) => String(a.id).localeCompare(String(b.id))).forEach(m => {
+                    const filas = m.total_filas || 6, cols = m.total_columnas || 10;
+                    const rows = [['Máquina', m.nombre, 'ID', m.id], [], ['Espacio', 'Bandeja', 'Posición', 'SKU', 'Producto', 'Precio', 'Capacidad', 'Cantidad actual']];
+                    for (let f = 1; f <= filas; f++) for (let c = 1; c <= cols; c++) {
+                        const e = codigoEspacio(f, c);
+                        const a = getAsignacion(m.id, e);
+                        const prod = a ? state.inventario.find(p => String(p.sku) === String(a.sku)) : null;
+                        rows.push([Number(e), f, c, a ? a.sku : '', a ? (prod ? prod.nombre_producto : a.sku) : '(sin producto)',
+                            a ? Number(a.precio_venta_espacio) || '' : '', capacidadEspacio(m, e) || '', a ? Number(a.cantidad_asignada) || 0 : '']);
+                    }
+                    const ws = XLSX.utils.aoa_to_sheet(rows);
+                    ws['!cols'] = [{ wch: 9 }, { wch: 9 }, { wch: 9 }, { wch: 30 }, { wch: 34 }, { wch: 9 }, { wch: 11 }, { wch: 15 }];
+                    XLSX.utils.book_append_sheet(wb, ws, nombreHoja(m.nombre, usados));
+                });
+                XLSX.writeFile(wb, `inventario_gobox_${fechaLocal()}.xlsx`);
+                guardarHistorial('DESCARGAR_PLANILLA_INVENTARIO', `${state.inventario.length} productos, ${state.maquinas.length} máquinas`);
+            } catch (err) {
+                console.error(err);
+                alert('❌ No se pudo generar la planilla: ' + err.message);
+            }
+        };
+
+        window.openInvModal = function() { state.showInvModal = true; state.invPreview = null; state.invError = ''; render(); };
+        window.closeInvModal = function() { if (state.invLoading) return; state.showInvModal = false; state.invPreview = null; state.invError = ''; render(); };
+
+        function enteroONull(v) {
+            if (v === null || v === undefined || String(v).trim() === '') return null;
+            const n = Math.round(parseMonto(v));
+            return isNaN(n) ? null : n;
+        }
+
+        async function leerPlanillaInventario(file) {
+            await asegurarSheetJS();
+            const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+            const prev = { productos: [], nuevos: [], capacidades: [], cantidades: [], avisos: [], errores: [] };
+            const aoa = n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: null, raw: true, blankrows: false });
+
+            // --- Bodega ---
+            const hojaB = wb.SheetNames.find(n => normHeader(n) === 'bodega');
+            if (hojaB) {
+                const m = aoa(hojaB);
+                const hi = m.findIndex(r => (r || []).some(c => normHeader(c) === 'sku'));
+                if (hi >= 0) {
+                    const enc = m[hi].map(normHeader);
+                    const col = nombre => enc.findIndex(h => h.startsWith(nombre));
+                    const ix = { sku: col('sku'), nombre: col('producto'), familia: col('familia'), stock: col('stock bodega'), pc: col('precio compra'), pv: col('precio venta'), cad: col('fecha caducidad'), prov: col('proveedor') };
+                    m.slice(hi + 1).forEach((r, i) => {
+                        const sku = textoONull(r[ix.sku]); if (!sku) return;
+                        const fila = hi + i + 2;
+                        const p = state.inventario.find(x => String(x.sku) === sku);
+                        const stock = ix.stock >= 0 ? enteroONull(r[ix.stock]) : null;
+                        const pc = ix.pc >= 0 ? enteroONull(r[ix.pc]) : null;
+                        const pv = ix.pv >= 0 ? enteroONull(r[ix.pv]) : null;
+                        const cadTxt = ix.cad >= 0 ? r[ix.cad] : null;
+                        const cad = cadTxt === null || String(cadTxt).trim() === '' ? null : parseFechaImport(cadTxt);
+                        const prov = ix.prov >= 0 ? (textoONull(r[ix.prov]) || '') : null;
+                        if ([stock, pc, pv].some(x => x !== null && x < 0)) { prev.errores.push(`Bodega fila ${fila} (${sku}): hay valores negativos`); return; }
+                        if (cadTxt !== null && String(cadTxt).trim() !== '' && !cad) { prev.errores.push(`Bodega fila ${fila} (${sku}): fecha de caducidad no válida "${cadTxt}"`); return; }
+                        if (!p) {
+                            const nombre = textoONull(r[ix.nombre]); const familia = textoONull(r[ix.familia]);
+                            if (!nombre || !familia) { prev.errores.push(`Bodega fila ${fila}: SKU nuevo "${sku}" necesita Producto y Familia`); return; }
+                            prev.nuevos.push({ sku, nombre_producto: nombre, familia, cantidad_actual: stock || 0, precio_compra_unitario: pc || 0, precio_venta_unitario: pv || 0, fecha_compra: fechaLocal(), fecha_caducidad: cad, proveedor: prov || null, notas: 'Creado desde planilla de inventario' });
+                            return;
+                        }
+                        const cambios = {};
+                        if (stock !== null && stock !== (Number(p.cantidad_actual) || 0)) cambios.cantidad_actual = stock;
+                        if (pc !== null && pc !== (Number(p.precio_compra_unitario) || 0)) cambios.precio_compra_unitario = pc;
+                        if (pv !== null && pv !== (Number(p.precio_venta_unitario) || 0)) cambios.precio_venta_unitario = pv;
+                        const cadActual = p.fecha_caducidad ? String(p.fecha_caducidad).substring(0, 10) : null;
+                        if (ix.cad >= 0 && cad !== cadActual) cambios.fecha_caducidad = cad;
+                        if (prov !== null && prov !== (p.proveedor || '')) cambios.proveedor = prov;
+                        if (Object.keys(cambios).length) prev.productos.push({ id: p.id, sku, nombre: p.nombre_producto, antes: Number(p.cantidad_actual) || 0, cambios });
+                    });
+                } else prev.avisos.push('La hoja "Bodega" no tiene la fila de títulos (SKU…); se omitió.');
+            } else prev.avisos.push('No se encontró la hoja "Bodega"; solo se leerán las máquinas.');
+
+            // --- Máquinas ---
+            wb.SheetNames.forEach(n => {
+                const m = aoa(n);
+                const r0 = m[0] || [];
+                if (normHeader(r0[0]) !== 'maquina') return;
+                const maq = state.maquinas.find(x => String(x.id) === String(r0[3])) || state.maquinas.find(x => x.nombre === r0[1]);
+                if (!maq) { prev.errores.push(`Hoja "${n}": la máquina ${r0[1]} (${r0[3]}) no existe en el sistema`); return; }
+                const hi = m.findIndex(r => (r || []).some(c => normHeader(c) === 'espacio'));
+                if (hi < 0) return;
+                const enc = m[hi].map(normHeader);
+                const iE = enc.indexOf('espacio'), iCap = enc.indexOf('capacidad'), iCant = enc.indexOf('cantidad actual');
+                const caps = getCapacidades(maq);
+                const nuevasCaps = { ...caps };
+                let cambioCap = 0;
+                const filas = maq.total_filas || 6, cols = maq.total_columnas || 10;
+                m.slice(hi + 1).forEach(r => {
+                    const e = normEspacio(r[iE]); if (!e || isNaN(Number(e))) return;
+                    const n2 = Number(e), b = Math.floor((n2 - 1) / POSICIONES_TCN) + 1, pos = ((n2 - 1) % POSICIONES_TCN) + 1;
+                    if (b > filas || pos > cols) { prev.avisos.push(`${maq.nombre}: espacio ${e} no existe en la configuración (${filas}×${cols}); se omitió`); return; }
+                    const cap = iCap >= 0 ? enteroONull(r[iCap]) : null;
+                    const cant = iCant >= 0 ? enteroONull(r[iCant]) : null;
+                    if ((cap !== null && cap < 0) || (cant !== null && cant < 0)) { prev.errores.push(`${maq.nombre} espacio ${e}: valores negativos`); return; }
+                    if (cap !== null && cap !== (parseInt(caps[e], 10) || 0)) {
+                        if (cap > 0) nuevasCaps[e] = cap; else delete nuevasCaps[e];
+                        cambioCap++;
+                    }
+                    const capFinal = parseInt(nuevasCaps[e], 10) || null;
+                    if (cant !== null) {
+                        const a = getAsignacion(maq.id, e);
+                        if (!a) { if (cant > 0) prev.avisos.push(`${maq.nombre} espacio ${e}: tiene cantidad ${cant} pero no tiene producto asignado; se omitió`); return; }
+                        if (capFinal && cant > capFinal) prev.avisos.push(`${maq.nombre} espacio ${e}: cantidad ${cant} supera la capacidad ${capFinal}`);
+                        if (cant !== (Number(a.cantidad_asignada) || 0)) prev.cantidades.push({ id: a.id, maquina: maq.nombre, espacio: e, sku: a.sku, antes: Number(a.cantidad_asignada) || 0, despues: cant });
+                    }
+                });
+                if (cambioCap) prev.capacidades.push({ id: maq.id, maquina: maq.nombre, n: cambioCap, json: JSON.stringify(nuevasCaps), total: Object.values(nuevasCaps).reduce((t, x) => t + (parseInt(x, 10) || 0), 0) });
+            });
+            prev.archivo = file.name;
+            prev.totalCambios = prev.productos.length + prev.nuevos.length + prev.capacidades.length + prev.cantidades.length;
+            return prev;
+        }
+
+        window.handleInventarioFile = async function(input) {
+            const file = input && input.files && input.files[0];
+            if (!file) return;
+            state.invLoading = true; state.invError = ''; state.invPreview = null; render();
+            try { state.invPreview = await leerPlanillaInventario(file); }
+            catch (err) { console.error(err); state.invError = err.message || 'No se pudo leer el archivo.'; }
+            finally { state.invLoading = false; render(); }
+        };
+
+        async function enLotes(items, fn, tam = 8) {
+            for (let i = 0; i < items.length; i += tam) {
+                const res = await Promise.all(items.slice(i, i + tam).map(fn));
+                const err = res.find(r => r && r.error);
+                if (err) throw new Error(err.error.message);
+            }
+        }
+
+        window.confirmarInventario = async function() {
+            const pv = state.invPreview;
+            if (!pv || !pv.totalCambios || pv.errores.length) return;
+            if (!puedeEscribir()) return;
+            state.invLoading = true; state.invError = ''; render();
+            try {
+                await enLotes(pv.productos, x => supabaseClient.from('inventario_bodega').update(x.cambios).eq('id', x.id));
+                if (pv.nuevos.length) { const { error } = await supabaseClient.from('inventario_bodega').insert(pv.nuevos); if (error) throw new Error(error.message); }
+                await enLotes(pv.capacidades, x => supabaseClient.from('maquinas').update({ capacidad_por_espacio: x.json }).eq('id', x.id));
+                await enLotes(pv.cantidades, x => supabaseClient.from('asignaciones_maquina').update({ cantidad_asignada: x.despues, fecha_asignacion: fechaLocal() }).eq('id', x.id));
+                guardarHistorial('CARGAR_PLANILLA_INVENTARIO', `${pv.archivo}: ${pv.productos.length} productos actualizados, ${pv.nuevos.length} nuevos, ${pv.capacidades.length} máquinas con capacidades, ${pv.cantidades.length} espacios con cantidad`);
+                state.invLoading = false; state.showInvModal = false; state.invPreview = null;
+                await fetchAllData();
+                alert('✅ Inventario actualizado');
+            } catch (err) {
+                console.error(err);
+                state.invLoading = false;
+                state.invError = 'Error al guardar: ' + err.message + '. Puedes volver a cargar la misma planilla: solo se aplicará lo que falte.';
+                render();
+            }
+        };
+
+        function renderInventarioModal() {
+            if (!state.showInvModal) return '';
+            const p = state.invPreview;
+            const lista = (arr, fmt, max = 8) => arr.length ? `<ul class="mt-1 text-xs text-gray-700 list-disc ml-5">${arr.slice(0, max).map(x => `<li>${fmt(x)}</li>`).join('')}${arr.length > max ? `<li>… y ${arr.length - max} más</li>` : ''}</ul>` : '';
+            return `
+                <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                        <div class="bg-purple-700 text-white p-4 flex justify-between items-center sticky top-0">
+                            <h3 class="text-xl font-bold">📤 Cargar planilla de inventario</h3>
+                            <button onclick="window.closeInvModal()" class="text-2xl font-bold" aria-label="Cerrar">✕</button>
+                        </div>
+                        <div class="p-6 space-y-4">
+                            <p class="text-sm text-gray-600">Sube la planilla que descargaste con <strong>📄 Descargar planilla</strong>, ya completada. Solo se guardan los valores que cambiaron.</p>
+                            <label class="block">
+                                <span class="text-sm font-bold text-gray-700">Archivo (.xlsx)</span>
+                                <input type="file" id="invFile" accept=".xlsx,.xls" onchange="window.handleInventarioFile(this)" ${state.invLoading ? 'disabled' : ''}
+                                    class="mt-1 block w-full text-sm border rounded p-2 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:bg-purple-600 file:text-white file:font-bold">
+                            </label>
+                            ${state.invLoading ? `<div class="p-4 bg-blue-50 border border-blue-200 rounded text-sm">⏳ Procesando…</div>` : ''}
+                            ${state.invError ? `<div class="p-4 bg-red-50 border border-red-300 rounded text-sm text-red-800" role="alert">❌ ${esc(state.invError)}</div>` : ''}
+                            ${p ? `
+                                <div class="p-4 bg-gray-50 border rounded space-y-3 text-sm">
+                                    <div class="font-bold text-base">${esc(p.archivo)}</div>
+                                    <div>📦 Bodega: <strong>${p.productos.length}</strong> productos con cambios${p.nuevos.length ? ` · <strong>${p.nuevos.length}</strong> productos nuevos` : ''}
+                                        ${lista(p.productos, x => `${esc(x.nombre)}: ${'cantidad_actual' in x.cambios ? `stock ${x.antes} → <strong>${x.cambios.cantidad_actual}</strong>` : ''}${Object.keys(x.cambios).filter(k => k !== 'cantidad_actual').length ? ' · también ' + Object.keys(x.cambios).filter(k => k !== 'cantidad_actual').map(k => ({ precio_compra_unitario: 'precio compra', precio_venta_unitario: 'precio venta', fecha_caducidad: 'caducidad', proveedor: 'proveedor' }[k])).join(', ') : ''}`)}
+                                        ${lista(p.nuevos, x => `Nuevo: ${esc(x.nombre_producto)} (${esc(x.sku)}) · stock ${x.cantidad_actual}`)}
+                                    </div>
+                                    <div>🎯 Capacidades: ${p.capacidades.length ? p.capacidades.map(x => `<strong>${esc(x.maquina)}</strong> ${x.n} espacios (capacidad total ${x.total} unid.)`).join(' · ') : 'sin cambios'}</div>
+                                    <div>🔢 Cantidad en máquinas: <strong>${p.cantidades.length}</strong> espacios con cambios
+                                        ${lista(p.cantidades, x => `${esc(x.maquina)} espacio ${x.espacio}: ${x.antes} → <strong>${x.despues}</strong>`)}
+                                    </div>
+                                </div>
+                                ${p.avisos.length ? `<div class="p-3 bg-orange-50 border border-orange-300 rounded text-sm text-orange-900"><strong>⚠️ Avisos (${p.avisos.length})</strong>${lista(p.avisos, esc, 10)}</div>` : ''}
+                                ${p.errores.length ? `<div class="p-3 bg-red-50 border border-red-300 rounded text-sm text-red-900"><strong>❌ Errores (${p.errores.length}) — corrígelos en el Excel y vuelve a cargarlo</strong>${lista(p.errores, esc, 10)}</div>` : ''}
+                                <div class="flex gap-3">
+                                    <button onclick="window.confirmarInventario()" ${!p.totalCambios || p.errores.length || state.invLoading ? 'disabled' : ''} class="flex-1 bg-purple-600 text-white py-3 rounded hover:bg-purple-700 font-bold disabled:opacity-50 disabled:cursor-not-allowed">
+                                        ${p.errores.length ? 'Corrige los errores primero' : p.totalCambios ? `✅ Guardar ${p.totalCambios} cambios` : 'No hay cambios'}
+                                    </button>
+                                    <button onclick="window.closeInvModal()" class="flex-1 bg-gray-600 text-white py-3 rounded hover:bg-gray-700 font-bold">Cancelar</button>
+                                </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ============================================
         // INICIALIZAR GRÁFICOS (Chart.js)
         // ============================================
         const chartInstances = {};
@@ -2297,6 +2613,12 @@
             const familias = ['Todos', ...new Set(state.inventario.map(p => p.familia).filter(Boolean))];
             const proveedores = ['Todos', ...new Set(state.inventario.map(p => p.proveedor).filter(Boolean))];
             // Familias del formulario: base + las que ya existan en la BD (antes "Confites" no aparecía y se perdía al editar)
+            const enMaquinasPorSku = {};
+            state.asignaciones.forEach(a => { enMaquinasPorSku[a.sku] = (enMaquinasPorSku[a.sku] || 0) + (Number(a.cantidad_asignada) || 0); });
+            const uBodega = state.inventario.reduce((t, p) => t + (Number(p.cantidad_actual) || 0), 0);
+            const uMaquinas = Object.values(enMaquinasPorSku).reduce((t, x) => t + x, 0);
+            const valorCosto = state.inventario.reduce((t, p) => t + (Number(p.cantidad_actual) || 0) * (Number(p.precio_compra_unitario) || 0), 0)
+                + state.asignaciones.reduce((t, a) => { const p = state.inventario.find(x => String(x.sku) === String(a.sku)); return t + (Number(a.cantidad_asignada) || 0) * (p ? Number(p.precio_compra_unitario) || 0 : 0); }, 0);
             const familiasForm = [...new Set(['Snacks', 'Bebidas', 'Proteína', 'Dulces', 'Confites', ...state.inventario.map(p => p.familia).filter(Boolean)])];
 
             return `
@@ -2308,9 +2630,21 @@
                         <button onclick="window.openScannerModal()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 font-bold">
                             📷 Escanear Código
                         </button>
-                        <button onclick="window.exportarInventarioCSV()" class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 font-bold">
+                        <button onclick="window.descargarPlanillaInventario()" class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 font-bold">
+                            📄 Descargar planilla
+                        </button>
+                        <button onclick="window.openInvModal()" class="bg-purple-800 text-white px-4 py-2 rounded hover:bg-purple-900 font-bold">
+                            📤 Cargar planilla
+                        </button>
+                        <button onclick="window.exportarInventarioCSV()" class="bg-white border border-purple-600 text-purple-700 px-4 py-2 rounded hover:bg-purple-50 font-bold">
                             📥 Exportar CSV
                         </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="bg-white p-4 rounded-lg shadow"><div class="text-xs font-semibold text-gray-500 uppercase">Unidades en bodega</div><div class="text-2xl font-bold">${uBodega.toLocaleString('es-CL')}</div></div>
+                        <div class="bg-white p-4 rounded-lg shadow"><div class="text-xs font-semibold text-gray-500 uppercase">Unidades en máquinas</div><div class="text-2xl font-bold">${uMaquinas.toLocaleString('es-CL')}</div></div>
+                        <div class="bg-white p-4 rounded-lg shadow"><div class="text-xs font-semibold text-gray-500 uppercase">Valor del inventario a costo</div><div class="text-2xl font-bold">$${clp(valorCosto)}</div><div class="text-xs text-gray-500">según precio de compra</div></div>
                     </div>
 
                     <div class="bg-white p-4 rounded-lg shadow space-y-3">
@@ -2347,7 +2681,8 @@
                                     <th class="px-4 py-3 text-left text-sm font-bold">SKU</th>
                                     <th class="px-4 py-3 text-left text-sm font-bold">Nombre</th>
                                     <th class="px-4 py-3 text-left text-sm font-bold">Familia</th>
-                                    <th class="px-4 py-3 text-right text-sm font-bold">Cantidad</th>
+                                    <th class="px-4 py-3 text-right text-sm font-bold">Bodega</th>
+                                    <th class="px-4 py-3 text-right text-sm font-bold">En máquinas</th>
                                     <th class="px-4 py-3 text-right text-sm font-bold">Precio Venta</th>
                                     <th class="px-4 py-3 text-left text-sm font-bold">Vencimiento</th>
                                     <th class="px-4 py-3 text-center text-sm font-bold">Acciones</th>
@@ -2355,7 +2690,7 @@
                             </thead>
                             <tbody>
                                 ${filtered.length === 0 ? `
-                                    <tr><td colspan="7" class="px-4 py-6 text-center text-sm text-gray-500">No hay productos que coincidan con los filtros</td></tr>
+                                    <tr><td colspan="8" class="px-4 py-6 text-center text-sm text-gray-500">No hay productos que coincidan con los filtros</td></tr>
                                 ` : filtered.map(p => {
                                     let colorVenc = 'bg-gray-50';
                                     // Antes un producto sin fecha se pintaba rojo (new Date(null) = 1970)
@@ -2372,6 +2707,7 @@
                                             <td class="px-4 py-3 text-sm">${esc(p.nombre_producto)}</td>
                                             <td class="px-4 py-3 text-sm">${esc(p.familia)}</td>
                                             <td class="px-4 py-3 text-sm text-right font-bold">${Number(p.cantidad_actual) || 0}</td>
+                                            <td class="px-4 py-3 text-sm text-right">${enMaquinasPorSku[p.sku] || 0}</td>
                                             <td class="px-4 py-3 text-sm text-right">$${clp(p.precio_venta_unitario)}</td>
                                             <td class="px-4 py-3 text-sm">${esc(p.fecha_caducidad) || '—'}</td>
                                             <td class="px-4 py-3 text-center">
@@ -2462,7 +2798,7 @@
                                                         <div class="text-xs font-bold ${assignment ? 'text-blue-100' : 'text-gray-500'} mb-1">${espacio}</div>
                                                         ${assignment ? `
                                                             <div class="text-xs font-bold">${esc(String(product ? product.nombre_producto : assignment.sku + ' (sin stock)').substring(0, 14))}</div>
-                                                            <div class="text-lg font-bold text-white">${Number(assignment.cantidad_asignada) || 0}</div>
+                                                            <div class="text-lg font-bold text-white">${Number(assignment.cantidad_asignada) || 0}${capacidadEspacio(maquina, espacio) ? `<span class="text-xs font-normal text-blue-100">/${capacidadEspacio(maquina, espacio)}</span>` : ''}</div>
                                                         ` : `
                                                             <div class="text-xs text-gray-400">Vacío</div>
                                                         `}
@@ -2483,6 +2819,12 @@
                                 <div>Espacios asignados: <strong>${asignacionesMaquina.length}</strong></div>
                                 <div>Espacios vacíos: <strong>${filas * columnas - asignacionesMaquina.length}</strong></div>
                                 <div class="mt-2">Ocupación: <strong>${Math.round((asignacionesMaquina.length / (filas * columnas)) * 100)}%</strong></div>
+                                ${(() => {
+                                    const stock = asignacionesMaquina.reduce((t, a) => t + (Number(a.cantidad_asignada) || 0), 0);
+                                    const cap = asignacionesMaquina.reduce((t, a) => t + (capacidadEspacio(maquina, a.espacio) || 0), 0);
+                                    const faltan = asignacionesMaquina.reduce((t, a) => { const c = capacidadEspacio(maquina, a.espacio); return t + (c ? Math.max(0, c - (Number(a.cantidad_asignada) || 0)) : 0); }, 0);
+                                    return `<div class="mt-2">Stock en la máquina: <strong>${stock} unidades</strong>${cap ? ` de ${cap} de capacidad (${Math.round(stock / cap * 100)}%) · faltan <strong>${faltan}</strong> para llenarla` : ' · configura la capacidad de cada espacio en <em>Máquinas → Editar</em>'}</div>`;
+                                })()}
                                 <div class="mt-2">Ventas en el período (${getRangoPeriodo().label}): <strong>${ventasHoyMaquina.unidades} unidades</strong> en ${ventasHoyMaquina.count} transacciones ($${clp(ventasHoyMaquina.monto)})</div>
                                 <div class="mt-2 text-xs text-gray-600">Numeración TCN: espacio = (bandeja − 1) × 10 + posición. Bandeja 1 = 1–${columnas}, Bandeja 2 = 11–${10 + columnas}… El período se cambia en el Dashboard.</div>
                             </div>
@@ -2700,12 +3042,30 @@
 
 
                                 <div>
-                                    <label class="block text-sm font-bold mb-2">Productos por Espacio</label>
-                                    <div class="flex items-center gap-3">
-                                        <button onclick="window.decreaseProductos()" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 text-lg font-bold">−</button>
-                                        <input type="number" value="${state.machineConfig.productoPorSlot}" class="border p-2 rounded w-20 text-center text-lg font-bold" readonly>
-                                        <button onclick="window.increaseProductos()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 text-lg font-bold">+</button>
-                                        <span class="text-gray-600 text-sm ml-4">Actualmente: <strong>${state.machineConfig.productoPorSlot} producto${state.machineConfig.productoPorSlot !== 1 ? 's' : ''}</strong></span>
+                                    <label class="block text-sm font-bold mb-1">Capacidad de cada espacio (unidades)</label>
+                                    <p class="text-xs text-gray-500 mb-3">Cuántos productos caben en cada espiral. Deja vacío los espacios que no se usan. En la columna "Toda la bandeja" puedes poner un valor para llenar la bandeja completa y luego ajustar espacio por espacio.</p>
+                                    <div class="overflow-x-auto">
+                                        <table class="text-sm">
+                                            <thead>
+                                                <tr>
+                                                    <th class="p-1 text-left text-xs text-gray-500">Bandeja</th>
+                                                    <th class="p-1 text-xs text-gray-500">Toda la bandeja</th>
+                                                    ${Array.from({ length: state.machineConfig.columnas }).map((_, c) => `<th class="p-1 text-xs text-gray-500">Pos ${c + 1}</th>`).join('')}
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                ${Array.from({ length: state.machineConfig.filas }).map((_, fi) => `
+                                                    <tr>
+                                                        <td class="p-1 font-bold text-gray-600 text-xs">B${fi + 1}</td>
+                                                        <td class="p-1"><input type="number" min="0" max="99" placeholder="—" aria-label="Capacidad de toda la bandeja ${fi + 1}" onchange="window.llenarBandeja(${fi + 1}, this.value)" class="w-16 border border-blue-300 bg-blue-50 p-1 rounded text-center"></td>
+                                                        ${Array.from({ length: state.machineConfig.columnas }).map((_, ci) => {
+                                                            const e = codigoEspacio(fi + 1, ci + 1);
+                                                            const v = state.machineConfig.capacidades[e] || '';
+                                                            return `<td class="p-1"><label class="flex flex-col items-center text-[10px] text-gray-400">${e}<input type="number" min="0" max="99" value="${v}" aria-label="Capacidad espacio ${e}" oninput="window.setCapacidadConfig('${e}', this.value)" class="w-14 border p-1 rounded text-center text-sm text-gray-900"></label></td>`;
+                                                        }).join('')}
+                                                    </tr>`).join('')}
+                                            </tbody>
+                                        </table>
                                     </div>
                                 </div>
 
@@ -2713,8 +3073,7 @@
                                     <div class="text-sm font-bold mb-2">📊 Resumen:</div>
                                     <div class="text-sm space-y-1">
                                         <div>Total de espacios: <strong>${state.machineConfig.filas} bandejas × ${state.machineConfig.columnas} posiciones = ${state.machineConfig.filas * state.machineConfig.columnas}</strong></div>
-                                        <div>Capacidad por slot: <strong>${state.machineConfig.productoPorSlot} producto${state.machineConfig.productoPorSlot !== 1 ? 's' : ''}</strong></div>
-                                        <div>Capacidad total: <strong>${state.machineConfig.filas * state.machineConfig.columnas * state.machineConfig.productoPorSlot} unidades</strong></div>
+                                        <div>Capacidad total de la máquina: <strong><span id="capTotal">${totalCapacidadConfig()}</span> unidades</strong></div>
                                     </div>
                                 </div>
 
@@ -2845,16 +3204,15 @@
                                 </select>
                             </div>
 
-                            <div>
-                                <label class="block text-sm font-bold text-gray-700 mb-2">📊 Cantidad a Asignar</label>
-                                <input type="number" min="1" value="${state.newAssignment.cantidad_asignada}" oninput="window.updateAssignmentField('cantidad_asignada', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold">
-                                <p class="text-xs text-gray-500 mt-1">Cuántos productos de este tipo irán en el espacio ${state.newAssignment.espacio}</p>
-                            </div>
-
-                            <div>
-                                <label class="block text-sm font-bold text-gray-700 mb-2">🎯 Productos por Slot</label>
-                                <input type="number" min="1" value="${state.newAssignment.productos_por_slot}" oninput="window.updateAssignmentField('productos_por_slot', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold">
-                                <p class="text-xs text-gray-500 mt-1">Cuántos productos caben en cada posición dentro del espacio ${state.newAssignment.espacio}</p>
+                            <div class="grid grid-cols-2 gap-4">
+                                <label class="block text-sm font-bold text-gray-700">📦 Cantidad actual en el espacio
+                                    <input type="number" min="0" ${state.newAssignment.capacidad ? `max="${state.newAssignment.capacidad}"` : ''} value="${state.newAssignment.cantidad_asignada}" oninput="window.updateAssignmentField('cantidad_asignada', this.value)" class="mt-2 w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold">
+                                    <span class="block text-xs font-normal text-gray-500 mt-1">Unidades que hay hoy en la espiral (0 = vacía)</span>
+                                </label>
+                                <label class="block text-sm font-bold text-gray-700">🎯 Capacidad del espacio
+                                    <input type="number" min="0" max="99" value="${state.newAssignment.capacidad}" placeholder="—" oninput="window.updateAssignmentField('capacidad', this.value)" class="mt-2 w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold">
+                                    <span class="block text-xs font-normal text-gray-500 mt-1">Máximo que cabe en esta espiral</span>
+                                </label>
                             </div>
 
                             ${state.newAssignment.sku ? `
@@ -2862,10 +3220,8 @@
                                     <div class="text-sm font-bold text-green-900">✅ Resumen:</div>
                                     <div class="text-sm text-green-800 mt-2">
                                         <div>Producto: <strong>${esc(state.inventario.find(p => String(p.sku) === String(state.newAssignment.sku))?.nombre_producto)}</strong></div>
-                                        <div>Cantidad Total: <strong>${state.newAssignment.cantidad_asignada} unidades</strong></div>
-                                        <div>Productos por Slot: <strong>${state.newAssignment.productos_por_slot}</strong></div>
-                                        <div>Slots ocupados: <strong>${Math.ceil(state.newAssignment.cantidad_asignada / state.newAssignment.productos_por_slot)}</strong></div>
-                                        <div>Espacio: <strong>${state.newAssignment.espacio}</strong></div>
+                                        <div>Stock en el espacio: <strong>${state.newAssignment.cantidad_asignada}${state.newAssignment.capacidad ? ' de ' + state.newAssignment.capacidad : ''} unidades</strong>${state.newAssignment.capacidad ? ` · faltan <strong>${Math.max(0, state.newAssignment.capacidad - state.newAssignment.cantidad_asignada)}</strong> para llenarlo` : ''}</div>
+                                        <div>Espacio: <strong>${esc(describeEspacio(state.newAssignment.espacio))}</strong></div>
                                     </div>
                                 </div>
                             ` : ''}
@@ -3044,6 +3400,7 @@
                 ${state.showEditProductModal ? renderEditProductModal() : ''}
                 ${state.showEditAssignmentModal ? renderEditAssignmentModal() : ''}
                 ${state.showImportModal ? renderImportModal() : ''}
+                ${state.showInvModal ? renderInventarioModal() : ''}
             `;
 
             // Restaurar foco y cursor
