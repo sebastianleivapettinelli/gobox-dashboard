@@ -1,0 +1,2677 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GO BOX Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.0/dist/umd/supabase.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <style>
+        * { scrollbar-width: thin; }
+        .stat-card { transition: transform 0.2s, box-shadow 0.2s; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: 0 10px 20px rgba(0,0,0,0.1); }
+        .tab-btn.active { border-bottom-color: #2563eb; color: #2563eb; }
+        .tab-btn { border-bottom-color: transparent; }
+        .logo { font-weight: 900; font-size: 1.5rem; letter-spacing: -0.05em; }
+        .logo-go { color: white; }
+        .logo-box { color: #3b82f6; }
+        #scanner { width: 100%; max-width: 500px; }
+        .scanner-overlay { position: relative; width: 100%; max-width: 500px; margin: 0 auto; }
+        .scanner-overlay::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 200px;
+            height: 100px;
+            border: 2px solid #ef4444;
+            border-radius: 10px;
+            pointer-events: none;
+            box-shadow: inset 0 0 20px rgba(239, 68, 68, 0.3);
+        }
+        .grid-cell-large { aspect-ratio: 1; border: 2px solid #e5e7eb; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; text-align: center; padding: 8px; cursor: pointer; border-radius: 6px; transition: all 0.2s; min-width: 80px; min-height: 80px; }
+        .grid-cell-large.occupied-lg { background: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%); color: white; font-weight: bold; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4); }
+        .grid-cell-large.empty-lg { background: #f9fafb; border-color: #d1d5db; color: #9ca3af; }
+        .grid-cell-large:hover { box-shadow: 0 8px 16px rgba(0,0,0,0.15); transform: translateY(-2px); }
+        .alert-item { padding: 12px; border-left: 4px solid; border-radius: 4px; margin-bottom: 8px; }
+        .alert-red { background: #fee2e2; border-color: #dc2626; }
+        .alert-yellow { background: #fef3c7; border-color: #f59e0b; }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div id="app"></div>
+
+    <script>
+        const SUPABASE_URL = 'https://ghbcghqulpvukmuatuck.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdoYmNnaHF1bHB2dWttdWF0dWNrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwMDQ5MjMsImV4cCI6MjEwNTU4MDkyM30.LyBnSnQ4FrCe32ves6Ys9mzT-D2P3Ase-_cgaEaWBjk';
+        
+        // NOTA DE SEGURIDAD: la clave "anon" es pública por diseño (va en todo frontend de Supabase).
+        // Lo que protege los datos son las políticas RLS de supabase/seguridad.sql: sin sesión iniciada
+        // esta clave no puede leer ni escribir nada. NUNCA pongas aquí la clave "service_role".
+
+        // Modo demo explícito: abrir la página con ?demo  → datos de ejemplo, sin login, nada se guarda.
+        const DEMO = new URLSearchParams(window.location.search).has('demo');
+
+        // Cierre de sesión automático por inactividad (útil si alguien deja el celular/PC abierto)
+        const INACTIVIDAD_MAX_MIN = 30;
+        // Bloqueo temporal tras varios intentos de login fallidos
+        const LOGIN_MAX_INTENTOS = 5;
+        const LOGIN_BLOQUEO_SEG = 60;
+
+        // Si la librería de Supabase no carga (sin internet / CDN bloqueado), usar un cliente "vacío"
+        // que devuelve error en vez de dejar la pantalla en blanco.
+        function createOfflineClient() {
+            const fail = { data: null, error: { message: 'Supabase no disponible (sin conexión)' } };
+            const chain = new Proxy(function () {}, {
+                get: (target, prop) => prop === 'then' ? (resolve) => resolve(fail) : chain,
+                apply: () => chain
+            });
+            return {
+                from: () => chain,
+                auth: {
+                    getSession: async () => ({ data: { session: null }, error: null }),
+                    onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+                    signInWithPassword: async () => fail,
+                    signOut: async () => ({ error: null })
+                }
+            };
+        }
+        const supabaseClient = (window.supabase && window.supabase.createClient)
+            ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+                auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
+              })
+            : createOfflineClient();
+
+        const state = {
+            activeTab: 'dashboard',
+            currentUser: '',
+            session: null,
+            loadError: null,
+            loginLoading: false,
+            loginError: '',
+            loginFails: 0,
+            loginBlockedUntil: 0,
+            periodo: 'ultimo',
+            showImportModal: false,
+            importPreview: null,
+            importLoading: false,
+            importError: '',
+            ventas: [],
+            inventario: [],
+            asignaciones: [],
+            maquinas: [],
+            historial: [],
+            loading: true,
+            showNewProductForm: false,
+            showAddMachineForm: false,
+            showScannerModal: false,
+            showEditProductModal: false,
+            showLoginModal: false,
+            editingProduct: null,
+            editingMachine: null,
+            selectedMachineForAssignment: null,
+            editingAssignmentSpace: null,
+            showEditAssignmentModal: false,
+            newAssignment: {
+                maquina_id: '',
+                espacio: '',
+                sku: '',
+                cantidad_asignada: 1,
+                productos_por_slot: 1
+            },
+            scannerActive: false,
+            detectedBarcode: null,
+            scannedProductData: null,
+            searchQuery: '',
+            filterFamilia: 'Todos',
+            filterProveedor: 'Todos',
+            filterEstado: 'Todos',
+            machineConfig: {
+                filas: 6,
+                columnas: 10,
+                productoPorSlot: 1
+            },
+            loginForm: {
+                email: '',
+                password: ''
+            },
+            newProduct: {
+                sku: '',
+                nombre_producto: '',
+                familia: 'Snacks',
+                precio_compra_unitario: '',
+                precio_venta_unitario: '',
+                cantidad_actual: '',
+                fecha_compra: new Date().toISOString().split('T')[0],
+                fecha_caducidad: '',
+                proveedor: '',
+            },
+            newMachine: {
+                nombre: '',
+                serial_amit: '',
+                ubicacion: '',
+                total_filas: 6,
+                total_columnas: 10,
+                productos_por_slot: 1,
+                capacidadPorEspacio: {} // { espacio: capacidad, ej: "1": 4, "2": 11 }
+            }
+        };
+
+        // Limpieza del login antiguo (guardaba el usuario en localStorage sin validar nada)
+        try { localStorage.removeItem('gobox_user'); } catch (e) {}
+
+        // ============================================
+        // UTILIDADES
+        // ============================================
+        // Fecha local (Chile) en formato YYYY-MM-DD. toISOString() usa UTC y
+        // después de las 21:00 hrs devolvía la fecha de "mañana".
+        function fechaLocal(offsetDias = 0) {
+            const d = new Date();
+            d.setDate(d.getDate() + offsetDias);
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        }
+
+        // Escapa texto antes de insertarlo en HTML (evita que comillas o < > rompan la vista)
+        function esc(value) {
+            if (value === null || value === undefined) return '';
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Formatea montos CLP sin reventar si el valor viene null/string
+        function clp(value, opts = {}) {
+            return (Number(value) || 0).toLocaleString('es-CL', { maximumFractionDigits: 0, ...opts });
+        }
+
+        function emptyProduct() {
+            return { sku: '', nombre_producto: '', familia: 'Snacks', precio_compra_unitario: '', precio_venta_unitario: '', cantidad_actual: '', fecha_compra: fechaLocal(), fecha_caducidad: '', proveedor: '' };
+        }
+
+        // ============================================
+        // NUMERACIÓN DE ESPACIOS (verificada con el reporte real de PayScan)
+        // Máquina TCN: bandejas de 10 posiciones. espacio = (bandeja − 1) × 10 + posición
+        // Bandeja 1 = 1..10, Bandeja 2 = 11..20, ..., Bandeja 6 = 51..60
+        // PayScan lo informa en la columna "Producto" en hexadecimal: '3800' o '0038' = 0x38 = 56
+        // ============================================
+        const MAX_FILAS = 9;          // bandejas
+        const MAX_COLUMNAS = 10;      // posiciones por bandeja (numeración TCN de 10 en 10)
+        const POSICIONES_TCN = 10;
+
+        function codigoEspacio(bandeja, posicion) {
+            return String((bandeja - 1) * POSICIONES_TCN + posicion);
+        }
+
+        // Normaliza el espacio: 12, '12', '012' → '12'. Formato antiguo del dashboard '0102' (fila 1, col 2) → '2'
+        function normEspacio(value) {
+            if (value === null || value === undefined) return '';
+            const txt = String(value).trim();
+            if (/^\d{4}$/.test(txt)) {
+                return codigoEspacio(parseInt(txt.substring(0, 2), 10), parseInt(txt.substring(2, 4), 10));
+            }
+            const n = parseInt(txt, 10);
+            return isNaN(n) ? txt : String(n);
+        }
+
+        // Código "Producto" de PayScan → número de espacio
+        function decodeEspacioPayscan(code) {
+            const txt = String(code ?? '').trim().toUpperCase();
+            if (/^[0-9A-F]{4}$/.test(txt)) {
+                const alto = parseInt(txt.substring(0, 2), 16);
+                const bajo = parseInt(txt.substring(2, 4), 16);
+                const n = alto || bajo;
+                return n ? String(n) : '';
+            }
+            if (/^\d{1,2}$/.test(txt)) return String(parseInt(txt, 10));
+            return '';
+        }
+
+        function describeEspacio(codigo) {
+            const n = parseInt(codigo, 10);
+            if (isNaN(n) || n < 1) return `Espacio ${esc(codigo)}`;
+            return `Espacio ${n} (Bandeja ${Math.floor((n - 1) / POSICIONES_TCN) + 1} · Posición ${((n - 1) % POSICIONES_TCN) + 1})`;
+        }
+
+        function buildCapacidades(filas, columnas, porSlot) {
+            const caps = {};
+            for (let f = 1; f <= (filas || 0); f++) {
+                for (let c = 1; c <= (columnas || 0); c++) {
+                    caps[codigoEspacio(f, c)] = porSlot || 1;
+                }
+            }
+            return caps;
+        }
+
+        // Serial sin ceros a la izquierda: '0000000000440864' → '440864', '0' → '0'
+        function normSerial(v) {
+            const t = String(v ?? '').trim();
+            return t.replace(/^0+(?=.)/, '');
+        }
+
+        // Una venta puede traer maquina_id o solo el serial del PayScan
+        function getMaquinaDeVenta(v) {
+            if (v.maquina_id) {
+                const m = state.maquinas.find(m => String(m.id) === String(v.maquina_id));
+                if (m) return m;
+            }
+            if (v.serial_amit !== undefined && v.serial_amit !== null && v.serial_amit !== '') {
+                return state.maquinas.find(m => normSerial(m.serial_amit) === normSerial(v.serial_amit)) || null;
+            }
+            return null;
+        }
+
+        function getAsignacion(maquinaId, espacio) {
+            const cod = normEspacio(espacio);
+            return state.asignaciones.find(a => String(a.maquina_id) === String(maquinaId) && normEspacio(a.espacio) === cod) || null;
+        }
+
+        // Producto vendido: por código del producto o, si PayScan no lo trae, por lo asignado en ese espacio
+        function getProductoDeVenta(v) {
+            const maquina = getMaquinaDeVenta(v);
+            if (maquina && v.espacio !== undefined && v.espacio !== null) {
+                const asig = getAsignacion(maquina.id, v.espacio);
+                if (asig) return state.inventario.find(p => String(p.sku) === String(asig.sku)) || null;
+            }
+            return null;
+        }
+
+        function emptyMachine() {
+            return { nombre: '', serial_amit: '', ubicacion: '', total_filas: 6, total_columnas: 10, productos_por_slot: 1, capacidadPorEspacio: buildCapacidades(6, 10, 1) };
+        }
+
+        function emptyAssignment() {
+            return { maquina_id: '', espacio: '', sku: '', cantidad_asignada: 1, productos_por_slot: 1 };
+        }
+
+        state.newMachine = emptyMachine();
+        state.demoMode = false;
+
+
+        window.fetchAllData = (...args) => fetchAllData(...args);
+
+        function loadMockData() {
+            console.log('📋 Llenando datos de ejemplo...');
+            state.maquinas = [
+                { id: '550e8400-e29b-41d4-a716-446655440000', nombre: 'Parque Lomas', ubicacion: 'Concepción - Lomas de San Andrés', serial_amit: '0', total_filas: 6, total_columnas: 10, productos_por_slot: 1 },
+                { id: '6ba7b810-9dad-11d1-80b4-00c04fd430c8', nombre: 'Edificio New', ubicacion: 'Concepción - Centro', serial_amit: '0000000000440864', total_filas: 6, total_columnas: 8, productos_por_slot: 1 }
+            ];
+            state.inventario = [
+                { id: '1', sku: 'SKU001', nombre_producto: 'Energizante Red Bull', familia: 'Bebidas', precio_compra_unitario: 2000, precio_venta_unitario: 3500, cantidad_actual: 45, fecha_compra: '2025-01-01', fecha_caducidad: '2025-12-31', proveedor: 'Distribuidora Centro' },
+                { id: '2', sku: 'SKU002', nombre_producto: 'Papas Fritas Lay\'s', familia: 'Snacks', precio_compra_unitario: 1200, precio_venta_unitario: 2200, cantidad_actual: 120, fecha_compra: '2025-01-01', fecha_caducidad: '2025-06-30', proveedor: 'Distribuidora Centro' },
+                { id: '3', sku: 'SKU003', nombre_producto: 'Chicle Trident', familia: 'Confites', precio_compra_unitario: 300, precio_venta_unitario: 700, cantidad_actual: 3, fecha_compra: '2025-01-01', fecha_caducidad: '2025-03-15', proveedor: 'Mayorista Local' }
+            ];
+            // Fechas dinámicas para que el Dashboard muestre algo en modo demo
+            const hoy = fechaLocal();
+            const ayer = fechaLocal(-1);
+            state.ventas = [
+                { id: '1', id_transaccion: 'demo-1', fecha: hoy, hora: '14:30:00', timestamp_completo: `${hoy}T14:30:00`, serial_amit: '0', espacio: '15', producto_codigo: '000F', monto_venta: 3500, comision: 104, neto_comision: 87, resultado_transaccion: 'APPROVED', metodo_pago: 'DEBIT' },
+                { id: '2', id_transaccion: 'demo-2', fecha: hoy, hora: '12:15:00', timestamp_completo: `${hoy}T12:15:00`, serial_amit: '0000000000440864', espacio: '33', producto_codigo: '2100', monto_venta: 4400, comision: 131, neto_comision: 110, resultado_transaccion: 'APPROVED', metodo_pago: 'CREDIT' },
+                { id: '3', id_transaccion: 'demo-3', fecha: ayer, hora: '18:05:00', timestamp_completo: `${ayer}T18:05:00`, serial_amit: '0', espacio: '21', producto_codigo: '0015', monto_venta: 700, comision: 21, neto_comision: 17, resultado_transaccion: 'APPROVED', metodo_pago: 'DEBIT' }
+            ];
+            state.asignaciones = [
+                { id: 'a1', maquina_id: '550e8400-e29b-41d4-a716-446655440000', espacio: '15', sku: 'SKU001', cantidad_asignada: 6, productos_por_slot: 1, precio_venta_espacio: 3500 },
+                { id: 'a2', maquina_id: '550e8400-e29b-41d4-a716-446655440000', espacio: '21', sku: 'SKU003', cantidad_asignada: 10, productos_por_slot: 1, precio_venta_espacio: 700 },
+                { id: 'a3', maquina_id: '6ba7b810-9dad-11d1-80b4-00c04fd430c8', espacio: '33', sku: 'SKU002', cantidad_asignada: 8, productos_por_slot: 1, precio_venta_espacio: 2200 }
+            ];
+            state.historial = [];
+            console.log('✅ Datos de ejemplo cargados correctamente');
+        }
+
+        async function fetchAllData() {
+            if (state.demoMode) { loadMockData(); render(); return; }
+            if (!state.session) { render(); return; } // sin sesión no se consulta nada
+            state.loading = true;
+            state.loadError = null;
+            render();
+            try {
+                const results = await Promise.allSettled([
+                    fetchVentas(),
+                    fetchInventario(),
+                    fetchAsignaciones(),
+                    fetchMaquinas(),
+                    fetchHistorial()
+                ]);
+                // En producción NO se muestran datos inventados: si algo falla se avisa.
+                const fallidas = ['Ventas', 'Inventario', 'Asignaciones', 'Máquinas']
+                    .filter((_, i) => !(results[i].status === 'fulfilled' && results[i].value === true));
+                if (fallidas.length) state.loadError = `No se pudieron cargar: ${fallidas.join(', ')}. Revisa tu conexión o las políticas de Supabase.`;
+            } catch (err) {
+                console.error('Error cargando datos:', err);
+                state.loadError = 'Error inesperado al cargar datos.';
+            } finally {
+                state.loading = false;
+                render(); // render() ya inicializa los gráficos del dashboard
+            }
+        }
+
+        // Cada fetch devuelve true si la consulta a Supabase fue exitosa
+        async function fetchVentas() {
+            try {
+                // Últimos ~2 meses (para comparar 30 días vs 30 anteriores). Supabase entrega máx. 1000 filas
+                // por consulta, así que se pide por páginas.
+                const desde = fechaLocal(-62);
+                let todas = [];
+                for (let from = 0; from < 50000; from += 1000) {
+                    const { data, error } = await supabaseClient
+                        .from('ventas_payscan')
+                        .select('*')
+                        .gte('fecha', desde)
+                        .order('timestamp_completo', { ascending: false })
+                        .range(from, from + 999);
+                    if (error) throw error;
+                    todas = todas.concat(data || []);
+                    if (!data || data.length < 1000) break;
+                }
+                state.ventas = todas;
+                return true;
+            } catch (err) {
+                console.warn('⚠️ No se pudo conectar con ventas:', err.message);
+                state.ventas = [];
+                return false;
+            }
+        }
+
+        async function fetchInventario() {
+            const { data, error } = await supabaseClient.from('inventario_bodega').select('*').order('fecha_caducidad', { ascending: true });
+            if (error) { console.error('Error fetching inventario:', error); return false; }
+            state.inventario = data || [];
+            return true;
+        }
+
+        async function fetchAsignaciones() {
+            const { data, error } = await supabaseClient.from('asignaciones_maquina').select('*');
+            if (error) { console.error('Error fetching asignaciones:', error); return false; }
+            state.asignaciones = data || [];
+            return true;
+        }
+
+        async function fetchMaquinas() {
+            const { data, error } = await supabaseClient.from('maquinas').select('*');
+            if (error) { console.error('Error fetching maquinas:', error); return false; }
+            state.maquinas = data || [];
+            return true;
+        }
+
+        // Historial ahora vive en Supabase (tabla historial_cambios): compartido entre tus dispositivos
+        // y socios, y no se puede editar ni borrar desde el dashboard (auditoría real).
+        async function fetchHistorial() {
+            const { data, error } = await supabaseClient
+                .from('historial_cambios')
+                .select('created_at, usuario, accion, detalles')
+                .order('created_at', { ascending: false })
+                .limit(100);
+            if (error) { console.warn('Historial no disponible:', error.message); state.historial = []; return false; }
+            state.historial = (data || []).map(h => ({ timestamp: h.created_at, usuario: h.usuario, accion: h.accion, detalles: h.detalles }));
+            return true;
+        }
+
+        function guardarHistorial(accion, detalles) {
+            const registro = {
+                timestamp: new Date().toISOString(),
+                usuario: state.currentUser,
+                accion: accion,
+                detalles: detalles
+            };
+            state.historial.unshift(registro);
+            state.historial = state.historial.slice(0, 100);
+            if (state.demoMode || !state.session) return;
+            // Se registra en segundo plano; user_id lo asigna la base de datos (auth.uid())
+            supabaseClient.from('historial_cambios')
+                .insert([{ usuario: state.currentUser, accion, detalles: String(detalles).slice(0, 500) }])
+                .then(({ error }) => { if (error) console.warn('No se pudo registrar en historial:', error.message); });
+        }
+
+        // ============================================
+        // LOGIN (Supabase Auth: email + contraseña)
+        // ============================================
+        function setSession(session) {
+            state.session = session;
+            state.currentUser = session ? (session.user.email || 'Usuario') : '';
+        }
+
+        function limpiarDatos() {
+            state.ventas = []; state.inventario = []; state.asignaciones = []; state.maquinas = []; state.historial = [];
+            state.selectedMachineForAssignment = null; state.editingMachine = null; state.editingProduct = null;
+            state.showEditProductModal = false; state.showEditAssignmentModal = false; state.showScannerModal = false;
+            state.showImportModal = false; state.importPreview = null;
+            state.activeTab = 'dashboard';
+        }
+
+        window.updateLoginField = function(field, value) {
+            state.loginForm[field] = value;
+        };
+
+        window.handleLogin = async function() {
+            if (state.loginLoading) return;
+            const email = state.loginForm.email.trim().toLowerCase();
+            const password = state.loginForm.password;
+
+            const restante = Math.ceil((state.loginBlockedUntil - Date.now()) / 1000);
+            if (restante > 0) {
+                state.loginError = `Demasiados intentos. Espera ${restante} s.`;
+                render();
+                return;
+            }
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password) {
+                state.loginError = 'Ingresa un correo válido y tu contraseña.';
+                render();
+                return;
+            }
+
+            state.loginLoading = true;
+            state.loginError = '';
+            render();
+
+            const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+            state.loginLoading = false;
+
+            if (error || !data || !data.session) {
+                state.loginFails++;
+                if (state.loginFails >= LOGIN_MAX_INTENTOS) {
+                    state.loginBlockedUntil = Date.now() + LOGIN_BLOQUEO_SEG * 1000;
+                    state.loginFails = 0;
+                    setTimeout(() => { state.loginError = ''; render(); }, LOGIN_BLOQUEO_SEG * 1000 + 200);
+                }
+                // Mensaje genérico: no revela si el correo existe
+                state.loginError = error && /fetch|network|disponible/i.test(error.message)
+                    ? 'Sin conexión con el servidor. Intenta de nuevo.'
+                    : 'Correo o contraseña incorrectos.';
+                state.loginForm.password = '';
+                render();
+                return;
+            }
+
+            state.loginFails = 0;
+            state.loginForm = { email: '', password: '' };
+            setSession(data.session);
+            marcarActividad();
+            guardarHistorial('LOGIN', `Inicio de sesión`);
+            await fetchAllData();
+        };
+
+        window.handleLogout = async function(motivo) {
+            if (!motivo && !confirm('¿Cerrar sesión?')) return;
+            if (state.demoMode) { window.location.href = window.location.pathname; return; }
+            // Registrar ANTES de cerrar (después ya no hay permiso para escribir)
+            if (state.session) {
+                await supabaseClient.from('historial_cambios')
+                    .insert([{ usuario: state.currentUser, accion: 'LOGOUT', detalles: motivo || 'Sesión cerrada' }])
+                    .then(() => {}, () => {});
+            }
+            await supabaseClient.auth.signOut();
+            setSession(null);
+            limpiarDatos();
+            state.loginError = motivo ? 'Sesión cerrada por inactividad.' : '';
+            render();
+        };
+
+        // --- Cierre automático por inactividad ---
+        let ultimaActividad = Date.now();
+        function marcarActividad() { ultimaActividad = Date.now(); }
+        ['click', 'keydown', 'touchstart', 'scroll'].forEach(ev => window.addEventListener(ev, marcarActividad, { passive: true }));
+        setInterval(() => {
+            if (state.session && !state.demoMode && Date.now() - ultimaActividad > INACTIVIDAD_MAX_MIN * 60000) {
+                window.handleLogout('Inactividad');
+            }
+        }, 60000);
+
+        // Si Supabase invalida la sesión (expiró, se cerró en otra pestaña, usuario eliminado)
+        supabaseClient.auth.onAuthStateChange((event, session) => {
+            if (event === 'SIGNED_OUT' && state.session) {
+                setSession(null);
+                limpiarDatos();
+                render();
+            } else if (event === 'TOKEN_REFRESHED' && session) {
+                state.session = session;
+            }
+        });
+
+        // Bloquea escrituras en modo demo (evita mensajes de error confusos)
+        function puedeEscribir() {
+            if (state.demoMode) { alert('Modo demo: los cambios no se guardan.'); return false; }
+            if (!state.session) { alert('Tu sesión expiró. Vuelve a ingresar.'); return false; }
+            return true;
+        }
+
+        async function iniciarApp() {
+            if (DEMO) {
+                state.demoMode = true;
+                state.currentUser = 'Demo';
+                state.loading = false;
+                loadMockData();
+                render();
+                return;
+            }
+            const { data } = await supabaseClient.auth.getSession();
+            setSession(data && data.session ? data.session : null);
+            state.loading = false;
+            if (state.session) await fetchAllData();
+            else render();
+        }
+
+        // ============================================
+        // EDITAR PRODUCTO
+        // ============================================
+        window.openEditProductModal = function(productId) {
+            // Los onclick pasan el id como texto; si en Supabase es numérico, === nunca coincidía
+            const product = state.inventario.find(p => String(p.id) === String(productId));
+            if (product) {
+                state.editingProduct = product;
+                state.newProduct = { ...product };
+                state.showEditProductModal = true;
+                render();
+            }
+        };
+
+        window.closeEditProductModal = function() {
+            state.editingProduct = null;
+            state.showEditProductModal = false;
+            state.newProduct = emptyProduct();
+            render();
+        };
+
+        window.saveProductChanges = async function() {
+            if (!puedeEscribir()) return;
+            if (!state.newProduct.sku || !state.newProduct.nombre_producto) {
+                alert('SKU y nombre son requeridos');
+                return;
+            }
+
+            const { error } = await supabaseClient.from('inventario_bodega').update({
+                nombre_producto: state.newProduct.nombre_producto,
+                familia: state.newProduct.familia,
+                precio_compra_unitario: parseFloat(state.newProduct.precio_compra_unitario) || 0,
+                precio_venta_unitario: parseFloat(state.newProduct.precio_venta_unitario) || 0,
+                cantidad_actual: parseInt(state.newProduct.cantidad_actual) || 0,
+                fecha_compra: state.newProduct.fecha_compra || null,
+                fecha_caducidad: state.newProduct.fecha_caducidad || null,
+                proveedor: state.newProduct.proveedor
+            }).eq('id', state.editingProduct.id);
+
+            if (error) { console.error('Error:', error); alert('❌ Error al guardar: ' + error.message); }
+            else {
+                guardarHistorial('EDITAR_PRODUCTO', `SKU: ${state.newProduct.sku}`);
+                alert('✅ Producto actualizado');
+                // Limpiar el estado de edición (antes el formulario "Nuevo Producto" quedaba precargado)
+                state.showEditProductModal = false;
+                state.editingProduct = null;
+                state.newProduct = emptyProduct();
+                await fetchInventario();
+                render();
+            }
+        };
+
+        window.selectMachineForAssignment = function(machineId) {
+            state.selectedMachineForAssignment = machineId;
+            render();
+        };
+
+        window.closeMachineAssignmentModal = function() {
+            state.selectedMachineForAssignment = null;
+            render();
+        };
+
+        // ============================================
+        // ============================================
+        window.openEditAssignmentModal = function(machineId, espacio) {
+            state.selectedMachineForAssignment = machineId;
+            state.editingAssignmentSpace = espacio;
+            espacio = normEspacio(espacio);
+            const assignment = getAsignacion(machineId, espacio);
+            const maquina = state.maquinas.find(m => String(m.id) === String(machineId));
+            state.newAssignment = {
+                maquina_id: machineId,
+                espacio: espacio,
+                sku: assignment ? assignment.sku : '',
+                cantidad_asignada: assignment ? assignment.cantidad_asignada : 1,
+                // Antes no se inicializaba → "Slots ocupados: NaN" y se guardaba undefined
+                productos_por_slot: (assignment && assignment.productos_por_slot) || (maquina && maquina.productos_por_slot) || 1
+            };
+            state.showEditAssignmentModal = true;
+            render();
+        };
+
+        window.closeEditAssignmentModal = function() {
+            state.showEditAssignmentModal = false;
+            state.editingAssignmentSpace = null;
+            state.newAssignment = emptyAssignment();
+            render();
+        };
+
+        window.updateAssignmentField = function(field, value) {
+            if (field === 'cantidad_asignada' || field === 'productos_por_slot') {
+                state.newAssignment[field] = Math.max(1, parseInt(value) || 1);
+            } else {
+                state.newAssignment[field] = value;
+            }
+            render();
+        };
+
+        window.saveAssignment = async function() {
+            if (!puedeEscribir()) return;
+            if (!state.newAssignment.sku) {
+                alert('⚠️ Debes seleccionar un producto');
+                return;
+            }
+
+            const product = state.inventario.find(p => p.sku === state.newAssignment.sku);
+            if (!product) {
+                alert('⚠️ Producto no encontrado');
+                return;
+            }
+
+            try {
+                const existingAssignment = getAsignacion(state.newAssignment.maquina_id, state.newAssignment.espacio);
+
+                if (existingAssignment) {
+                    // Actualizar
+                    const { error } = await supabaseClient.from('asignaciones_maquina').update({
+                        espacio: normEspacio(state.newAssignment.espacio),
+                        sku: state.newAssignment.sku,
+                        cantidad_asignada: state.newAssignment.cantidad_asignada,
+                        precio_venta_espacio: product.precio_venta_unitario,
+                        productos_por_slot: state.newAssignment.productos_por_slot
+                    }).eq('id', existingAssignment.id);
+
+                    if (error) {
+                        console.error('Error:', error);
+                        alert('❌ Error al actualizar: ' + error.message);
+                    } else {
+                        guardarHistorial('ACTUALIZAR_ASIGNACION', `Máquina: ${state.newAssignment.maquina_id}, Espacio: ${state.newAssignment.espacio}, Producto: ${state.newAssignment.sku}, Cantidad: ${state.newAssignment.cantidad_asignada}`);
+                        alert('✅ Asignación actualizada');
+                        await fetchAsignaciones();
+                        state.showEditAssignmentModal = false;
+                        render();
+                    }
+                } else {
+                    // Crear nueva
+                    const { error } = await supabaseClient.from('asignaciones_maquina').insert([{
+                        maquina_id: state.newAssignment.maquina_id,
+                        espacio: normEspacio(state.newAssignment.espacio),
+                        sku: state.newAssignment.sku,
+                        cantidad_asignada: state.newAssignment.cantidad_asignada,
+                        precio_venta_espacio: product.precio_venta_unitario,
+                        productos_por_slot: state.newAssignment.productos_por_slot
+                    }]);
+
+                    if (error) {
+                        console.error('Error:', error);
+                        alert('❌ Error al crear: ' + error.message);
+                    } else {
+                        guardarHistorial('CREAR_ASIGNACION', `Máquina: ${state.newAssignment.maquina_id}, Espacio: ${state.newAssignment.espacio}, Producto: ${state.newAssignment.sku}, Cantidad: ${state.newAssignment.cantidad_asignada}`);
+                        alert('✅ Asignación creada');
+                        await fetchAsignaciones();
+                        state.showEditAssignmentModal = false;
+                        render();
+                    }
+                }
+            } catch (err) {
+                console.error('Error:', err);
+                alert('💥 Error inesperado: ' + err.message);
+            }
+        };
+
+        window.deleteAssignmentFromModal = async function() {
+            if (!puedeEscribir()) return;
+            if (!confirm('¿Eliminar esta asignación?')) return;
+
+            const assignment = getAsignacion(state.newAssignment.maquina_id, state.newAssignment.espacio);
+
+            if (!assignment) {
+                alert('Este espacio no tiene asignación para eliminar');
+                return;
+            }
+
+            try {
+                const { error } = await supabaseClient.from('asignaciones_maquina').delete().eq('id', assignment.id);
+
+                if (error) {
+                    console.error('Error:', error);
+                    alert('❌ Error al eliminar: ' + error.message);
+                } else {
+                    guardarHistorial('ELIMINAR_ASIGNACION', `Máquina: ${state.newAssignment.maquina_id}, Espacio: ${state.newAssignment.espacio}`);
+                    alert('✅ Asignación eliminada');
+                    await fetchAsignaciones();
+                    state.showEditAssignmentModal = false;
+                    render();
+                }
+            } catch (err) {
+                console.error('Error:', err);
+                alert('💥 Error inesperado: ' + err.message);
+            }
+        };
+
+        // ============================================
+        // BÚSQUEDA Y FILTROS
+        // ============================================
+        window.updateSearchQuery = function(value) {
+            state.searchQuery = value.toLowerCase();
+            render();
+        };
+
+        window.updateFilter = function(filterType, value) {
+            if (filterType === 'familia') state.filterFamilia = value;
+            if (filterType === 'proveedor') state.filterProveedor = value;
+            if (filterType === 'estado') state.filterEstado = value;
+            render();
+        };
+
+        function getFilteredInventario() {
+            return state.inventario.filter(p => {
+                const matchSearch = !state.searchQuery || String(p.sku || '').toLowerCase().includes(state.searchQuery) || String(p.nombre_producto || '').toLowerCase().includes(state.searchQuery);
+                const matchFamilia = state.filterFamilia === 'Todos' || p.familia === state.filterFamilia;
+                const matchProveedor = state.filterProveedor === 'Todos' || p.proveedor === state.filterProveedor;
+                
+                let matchEstado = true;
+                if (state.filterEstado === 'Bajo Stock') matchEstado = (Number(p.cantidad_actual) || 0) < STOCK_CRITICO;
+                else if (state.filterEstado === 'Por Vencer') {
+                    if (!p.fecha_caducidad) return false;
+                    const venc = new Date(p.fecha_caducidad);
+                    const hoy = new Date();
+                    const dias = (venc - hoy) / (1000 * 60 * 60 * 24);
+                    matchEstado = dias < 30 && dias > 0;
+                }
+
+                return matchSearch && matchFamilia && matchProveedor && matchEstado;
+            });
+        }
+
+        // ============================================
+        // REPORTES
+        // ============================================
+        window.exportarInventarioCSV = function() {
+            const filtered = getFilteredInventario();
+            // Separador ";" y BOM UTF-8 → Excel en español abre columnas y tildes correctamente
+            const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+            let csv = 'SKU;Nombre;Familia;Cantidad;Precio Compra;Precio Venta;Vencimiento;Proveedor\n';
+
+            filtered.forEach(p => {
+                csv += [q(p.sku), q(p.nombre_producto), q(p.familia), Number(p.cantidad_actual) || 0, Number(p.precio_compra_unitario) || 0, Number(p.precio_venta_unitario) || 0, q(p.fecha_caducidad), q(p.proveedor)].join(';') + '\n';
+            });
+
+            const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `inventario_${fechaLocal()}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            guardarHistorial('EXPORTAR_CSV', `${filtered.length} productos`);
+        };
+
+        // ============================================
+        // SCANNER (igual que v4)
+        // ============================================
+        window.openScannerModal = function() {
+            state.showScannerModal = true;
+            state.detectedBarcode = null;
+            state.scannedProductData = null;
+            render();
+            setTimeout(() => { initializeScanner(); }, 100);
+        };
+
+        window.closeScannerModal = function() {
+            stopScanner();
+            state.showScannerModal = false;
+            state.detectedBarcode = null;
+            state.scannedProductData = null;
+            render();
+        };
+
+        window.confirmScannedProduct = function() {
+            if (!state.scannedProductData) return;
+            stopScanner();
+            state.showScannerModal = false;
+            state.activeTab = 'inventario';
+
+            // Si el producto YA existe, abrir edición (antes abría "Nuevo Producto" y duplicaba el SKU)
+            if (state.scannedProductData.id) {
+                state.detectedBarcode = null;
+                window.openEditProductModal(state.scannedProductData.id);
+                return;
+            }
+
+            state.newProduct = { ...emptyProduct(), sku: state.detectedBarcode };
+            state.showNewProductForm = true;
+            state.detectedBarcode = null;
+            state.scannedProductData = null;
+            render();
+        };
+
+        function onBarcodeDetected(result) {
+            if (result && result.codeResult && result.codeResult.code) {
+                const barcode = result.codeResult.code;
+                stopScanner();
+                state.detectedBarcode = barcode;
+                const existingProduct = state.inventario.find(p => String(p.sku) === String(barcode));
+                state.scannedProductData = existingProduct || { sku: barcode, nombre_producto: '', familia: 'Snacks', proveedor: '' };
+                render();
+            }
+        }
+
+        function initializeScanner() {
+            if (state.scannerActive) return;
+            const scanner = document.getElementById('scanner');
+            if (!scanner) return; // antes se marcaba activo antes de validar y quedaba bloqueado
+            if (typeof Quagga === 'undefined') { alert('No se pudo cargar el lector de códigos'); return; }
+            state.scannerActive = true;
+
+            Quagga.init({
+                inputStream: {
+                    name: 'Live',
+                    type: 'LiveStream',
+                    target: scanner,
+                    constraints: { width: { min: 300 }, height: { min: 300 }, facingMode: 'environment' }
+                },
+                decoder: {
+                    workers: 2,
+                    multiple: false,
+                    readers: ['ean_reader', 'upc_reader', 'code128_reader', 'code39_reader']
+                }
+            }, function(err) {
+                if (err) {
+                    console.error('Quagga init error:', err);
+                    alert('Error al acceder a la cámara (requiere HTTPS y permiso de cámara)');
+                    state.scannerActive = false;
+                    return;
+                }
+                // Evitar acumular listeners en cada "Escanear Otro"
+                Quagga.offDetected(onBarcodeDetected);
+                Quagga.onDetected(onBarcodeDetected);
+                Quagga.start();
+            });
+        }
+
+        function stopScanner() {
+            if (state.scannerActive) {
+                try {
+                    Quagga.offDetected(onBarcodeDetected);
+                    Quagga.stop();
+                } catch (e) {
+                    console.log('Scanner already stopped');
+                }
+                state.scannerActive = false;
+            }
+        }
+
+        // ============================================
+        // MÁQUINAS (igual que v4)
+        // ============================================
+        window.toggleAddMachineForm = function() {
+            state.showAddMachineForm = !state.showAddMachineForm;
+            // Antes el reset omitía capacidadPorEspacio → TypeError al reabrir el formulario
+            state.newMachine = emptyMachine();
+            render();
+        };
+
+        window.updateNewMachine = function(field, value) {
+            const esTexto = field === 'nombre' || field === 'serial_amit' || field === 'ubicacion';
+            if (esTexto) {
+                // Campos de texto: no hace falta re-renderizar (evita perder el foco al escribir)
+                state.newMachine[field] = value;
+                return;
+            }
+            const max = field === 'productos_por_slot' ? 50 : field === 'total_filas' ? MAX_FILAS : MAX_COLUMNAS;
+            state.newMachine[field] = Math.min(max, Math.max(1, parseInt(value) || 1));
+
+            // Si cambia filas, columnas o productos por slot, reinicializar la grilla de capacidades
+            state.newMachine.capacidadPorEspacio = buildCapacidades(
+                state.newMachine.total_filas,
+                state.newMachine.total_columnas,
+                state.newMachine.productos_por_slot
+            );
+
+            render();
+        };
+
+        window.updateCapacidadEspacio = function(espacio, capacidad) {
+            // Sin render: el valor ya está en el input y así no se pierde el foco
+            state.newMachine.capacidadPorEspacio[espacio] = Math.max(1, parseInt(capacidad) || 1);
+        };
+
+        window.addMachine = async function() {
+            if (!puedeEscribir()) return;
+            console.log('📌 DEBUG: Intentando agregar máquina con datos:', state.newMachine);
+            
+            if (!state.newMachine.nombre || !state.newMachine.serial_amit || !state.newMachine.ubicacion) {
+                const campos_vacios = [];
+                if (!state.newMachine.nombre) campos_vacios.push('Nombre');
+                if (!state.newMachine.serial_amit) campos_vacios.push('Serial AMIT');
+                if (!state.newMachine.ubicacion) campos_vacios.push('Ubicación');
+                alert('⚠️ Campos requeridos faltantes: ' + campos_vacios.join(', '));
+                console.log('❌ Campos vacíos:', campos_vacios);
+                return;
+            }
+
+            try {
+                const machineData = {
+                    nombre: state.newMachine.nombre,
+                    serial_amit: state.newMachine.serial_amit,
+                    ubicacion: state.newMachine.ubicacion,
+                    total_filas: parseInt(state.newMachine.total_filas) || 6,
+                    total_columnas: parseInt(state.newMachine.total_columnas) || 10,
+                    productos_por_slot: parseInt(state.newMachine.productos_por_slot) || 1,
+                    total_espacios: (parseInt(state.newMachine.total_filas) || 6) * (parseInt(state.newMachine.total_columnas) || 10),
+                    capacidad_por_espacio: JSON.stringify(state.newMachine.capacidadPorEspacio)
+                };
+                console.log('📤 Enviando a Supabase:', machineData);
+                
+                const { data, error } = await supabaseClient.from('maquinas').insert([machineData]);
+
+                if (error) {
+                    console.error('❌ Error Supabase:', error);
+                    alert('❌ Error al agregar máquina:\n' + (error.message || JSON.stringify(error)));
+                } else {
+                    console.log('✅ Máquina creada exitosamente:', data);
+                    guardarHistorial('CREAR_MAQUINA', `${state.newMachine.nombre}`);
+                    alert('✅ Máquina agregada correctamente');
+                    state.showAddMachineForm = false;
+                    state.newMachine = emptyMachine();
+                    await fetchMaquinas();
+                    render();
+                }
+            } catch (err) {
+                console.error('💥 Error inesperado:', err);
+                alert('💥 Error inesperado: ' + err.message);
+            }
+        };
+
+        window.editMachine = function(machineId) {
+            const machine = state.maquinas.find(m => String(m.id) === String(machineId));
+            if (machine) {
+                state.editingMachine = machine.id;
+                state.machineConfig = {
+                    filas: machine.total_filas || 6,
+                    columnas: machine.total_columnas || 10,
+                    productoPorSlot: machine.productos_por_slot || 1
+                };
+                render();
+            }
+        };
+
+        window.cancelEditMachine = function() {
+            state.editingMachine = null;
+            render();
+        };
+
+        window.increaseRows = function() { if (state.machineConfig.filas < MAX_FILAS) state.machineConfig.filas++; render(); };
+        window.decreaseRows = function() { if (state.machineConfig.filas > 1) state.machineConfig.filas--; render(); };
+        window.increaseCols = function() { if (state.machineConfig.columnas < MAX_COLUMNAS) state.machineConfig.columnas++; render(); };
+        window.decreaseCols = function() { if (state.machineConfig.columnas > 1) state.machineConfig.columnas--; render(); };
+        window.increaseProductos = function() { state.machineConfig.productoPorSlot++; render(); };
+        window.decreaseProductos = function() { if (state.machineConfig.productoPorSlot > 1) state.machineConfig.productoPorSlot--; render(); };
+
+        window.saveMachineConfig = async function() {
+            if (!puedeEscribir()) return;
+            const { error } = await supabaseClient.from('maquinas').update({
+                total_filas: state.machineConfig.filas,
+                total_columnas: state.machineConfig.columnas,
+                total_espacios: state.machineConfig.filas * state.machineConfig.columnas,
+                productos_por_slot: state.machineConfig.productoPorSlot
+            }).eq('id', state.editingMachine);
+
+            if (error) { console.error('Error saving:', error); alert('Error al guardar'); }
+            else { 
+                guardarHistorial('ACTUALIZAR_CONFIG_MAQUINA', `ID: ${state.editingMachine}`);
+                alert('✅ Configuración guardada'); 
+                state.editingMachine = null; 
+                await fetchMaquinas(); 
+                render(); 
+            }
+        };
+
+        window.deleteMachine = async function(machineId) {
+            if (!puedeEscribir()) return;
+            if (!confirm('¿Estás seguro de que quieres eliminar esta máquina?\nTambién se eliminarán sus asignaciones de productos.')) return;
+            // Primero las asignaciones: si la FK no tiene ON DELETE CASCADE, el delete de la máquina fallaba
+            const { error: errAsig } = await supabaseClient.from('asignaciones_maquina').delete().eq('maquina_id', machineId);
+            if (errAsig) { console.error('Error:', errAsig); alert('❌ Error al eliminar asignaciones: ' + errAsig.message); return; }
+            const { error } = await supabaseClient.from('maquinas').delete().eq('id', machineId);
+            if (error) { console.error('Error:', error); alert('❌ Error al eliminar: ' + error.message); }
+            else { 
+                guardarHistorial('ELIMINAR_MAQUINA', `ID: ${machineId}`);
+                alert('✅ Máquina eliminada');
+                await Promise.all([fetchMaquinas(), fetchAsignaciones()]);
+                render(); 
+            }
+        };
+
+        // ============================================
+        // INVENTARIO
+        // ============================================
+        window.toggleNewProductForm = function() {
+            state.showNewProductForm = !state.showNewProductForm;
+            if (!state.showNewProductForm) {
+                state.newProduct = emptyProduct();
+            }
+            render();
+        };
+
+        window.updateNewProduct = function(field, value) {
+            // Sin render(): antes cada tecla redibujaba la página y el input perdía el foco
+            state.newProduct[field] = value;
+        };
+
+        window.addProduct = async function() {
+            if (!puedeEscribir()) return;
+            if (!state.newProduct.sku || !state.newProduct.nombre_producto) {
+                alert('SKU y nombre son requeridos');
+                return;
+            }
+
+            const { error } = await supabaseClient.from('inventario_bodega').insert([{
+                sku: state.newProduct.sku,
+                nombre_producto: state.newProduct.nombre_producto,
+                familia: state.newProduct.familia,
+                precio_compra_unitario: parseFloat(state.newProduct.precio_compra_unitario) || 0,
+                precio_venta_unitario: parseFloat(state.newProduct.precio_venta_unitario) || 0,
+                cantidad_actual: parseInt(state.newProduct.cantidad_actual) || 0,
+                fecha_compra: state.newProduct.fecha_compra || null,
+                // '' no es una fecha válida para Postgres → se envía null
+                fecha_caducidad: state.newProduct.fecha_caducidad || null,
+                proveedor: state.newProduct.proveedor
+            }]);
+
+            if (error) { console.error('Error:', error); alert('❌ Error al agregar producto: ' + error.message); }
+            else {
+                guardarHistorial('CREAR_PRODUCTO', `SKU: ${state.newProduct.sku}`);
+                alert('✅ Producto agregado');
+                state.showNewProductForm = false;
+                state.newProduct = emptyProduct();
+                await fetchInventario();
+                render();
+            }
+        };
+
+        window.deleteProduct = async function(productId) {
+            if (!puedeEscribir()) return;
+            if (!confirm('¿Eliminar producto?')) return;
+            const product = state.inventario.find(p => String(p.id) === String(productId));
+            if (!product) { alert('Producto no encontrado'); return; }
+            const { error } = await supabaseClient.from('inventario_bodega').delete().eq('id', product.id);
+            if (error) { console.error('Error:', error); alert('❌ Error al eliminar: ' + error.message); }
+            else {
+                guardarHistorial('ELIMINAR_PRODUCTO', `SKU: ${product.sku}`);
+                alert('✅ Producto eliminado'); 
+                await fetchInventario(); 
+                render(); 
+            }
+        };
+
+        window.setTab = function(tabName) {
+            state.activeTab = tabName;
+            render();
+        };
+
+        // ============================================
+        // FUNCIONES DE CÁLCULO PARA DASHBOARD (FASE 1)
+        // ============================================
+        const STOCK_CRITICO = 5; // unidades bajo las cuales se considera stock crítico
+
+        // FALTABA: renderDashboard() la llamaba y lanzaba ReferenceError → el Dashboard no cargaba
+        function getStockCritico() {
+            return state.inventario
+                .filter(p => (Number(p.cantidad_actual) || 0) < STOCK_CRITICO)
+                .sort((a, b) => (Number(a.cantidad_actual) || 0) - (Number(b.cantidad_actual) || 0))
+                .slice(0, 10);
+        }
+
+        // Solo ventas aprobadas (si la columna existe)
+        function esVentaValida(v) {
+            return !v.resultado_transaccion || String(v.resultado_transaccion).toUpperCase() === 'APPROVED';
+        }
+
+        function fechaDeVenta(v) {
+            if (v.fecha) return String(v.fecha).substring(0, 10);
+            if (v.timestamp_completo) return String(v.timestamp_completo).substring(0, 10);
+            return '';
+        }
+
+        // ============================================
+        // PERÍODO DE ANÁLISIS
+        // Como las ventas se importan manualmente desde PayScan, "hoy" casi siempre estaría vacío.
+        // Por defecto se muestra el último día con ventas importadas.
+        // ============================================
+        const PERIODOS = {
+            ultimo: 'Último día con datos',
+            hoy: 'Hoy',
+            '7d': 'Últimos 7 días',
+            '30d': 'Últimos 30 días'
+        };
+
+        function addDias(fechaStr, n) {
+            const [y, m, d] = fechaStr.split('-').map(Number);
+            const dt = new Date(Date.UTC(y, m - 1, d + n));
+            return dt.toISOString().substring(0, 10);
+        }
+
+        function fmtFecha(fechaStr) {
+            if (!fechaStr) return '—';
+            const [y, m, d] = String(fechaStr).substring(0, 10).split('-');
+            return `${d}-${m}-${y}`;
+        }
+
+        function getUltimaFechaConVentas() {
+            let max = '';
+            state.ventas.forEach(v => { if (esVentaValida(v)) { const f = fechaDeVenta(v); if (f > max) max = f; } });
+            return max;
+        }
+
+        function getUltimaVenta() {
+            let max = null;
+            state.ventas.forEach(v => {
+                const ts = v.timestamp_completo ? String(v.timestamp_completo) : `${fechaDeVenta(v)}T${v.hora || '00:00:00'}`;
+                if (!max || ts > max) max = ts;
+            });
+            return max;
+        }
+
+        function getRangoPeriodo() {
+            const periodo = state.periodo || 'ultimo';
+            const ancla = periodo === 'hoy' ? fechaLocal() : (getUltimaFechaConVentas() || fechaLocal());
+            const dias = periodo === '7d' ? 7 : periodo === '30d' ? 30 : 1;
+            const hasta = ancla;
+            const desde = addDias(ancla, -(dias - 1));
+            const prevHasta = addDias(desde, -1);
+            const prevDesde = addDias(prevHasta, -(dias - 1));
+            const label = dias === 1 ? fmtFecha(desde) : `${fmtFecha(desde)} al ${fmtFecha(hasta)}`;
+            const prevLabel = dias === 1 ? fmtFecha(prevDesde) : `${fmtFecha(prevDesde)} al ${fmtFecha(prevHasta)}`;
+            return { periodo, dias, desde, hasta, prevDesde, prevHasta, label, prevLabel };
+        }
+
+        function ventasEntre(desde, hasta) {
+            return state.ventas.filter(v => { const f = fechaDeVenta(v); return f >= desde && f <= hasta && esVentaValida(v); });
+        }
+
+        function getVentasPeriodo() {
+            const r = getRangoPeriodo();
+            return ventasEntre(r.desde, r.hasta);
+        }
+
+        function getVentasPeriodoAnterior() {
+            const r = getRangoPeriodo();
+            return ventasEntre(r.prevDesde, r.prevHasta);
+        }
+
+        const sumaMontos = arr => arr.reduce((sum, v) => sum + parseFloat(v.monto_venta || 0), 0);
+
+        // Una transacción puede incluir varias unidades (ej: $3.900 = 3 × $1.300)
+        function unidadesDeVenta(v) {
+            const maquina = getMaquinaDeVenta(v);
+            const asig = maquina ? getAsignacion(maquina.id, v.espacio) : null;
+            let precio = asig ? Number(asig.precio_venta_espacio) : 0;
+            if (!precio && asig) {
+                const prod = state.inventario.find(p => String(p.sku) === String(asig.sku));
+                precio = prod ? Number(prod.precio_venta_unitario) : 0;
+            }
+            const monto = Number(v.monto_venta) || 0;
+            if (precio > 0 && monto >= precio * 2 && monto % precio === 0) return monto / precio;
+            return 1;
+        }
+
+        function getComparativa() {
+            const actual = sumaMontos(getVentasPeriodo());
+            const anterior = sumaMontos(getVentasPeriodoAnterior());
+            if (anterior === 0) return { porcentaje: 0, estado: 'sin_comparar', monto_hoy: actual, monto_ayer: anterior };
+            const cambio = ((actual - anterior) / anterior) * 100;
+            return {
+                porcentaje: cambio.toFixed(1),
+                estado: cambio > 0 ? 'positivo' : cambio < 0 ? 'negativo' : 'igual',
+                monto_hoy: actual,
+                monto_ayer: anterior
+            };
+        }
+
+        // Alias usados por el resto del código
+        const getVentasHoy = getVentasPeriodo;
+        const getTotalVentasHoy = () => sumaMontos(getVentasPeriodo());
+        const getTransaccionesHoy = () => getVentasPeriodo().length;
+        function getTicketPromedio() {
+            const v = getVentasPeriodo();
+            return v.length ? sumaMontos(v) / v.length : 0;
+        }
+        const getComparativaHoyVsAyer = getComparativa;
+
+        function getVentasPorHora() {
+            const ventas = getVentasPeriodo();
+            const porHora = {};
+            for (let i = 0; i < 24; i++) porHora[i] = 0;
+            ventas.forEach(v => {
+                const horaTxt = v.hora || (v.timestamp_completo ? String(v.timestamp_completo).substring(11, 13) : '');
+                const hora = parseInt(String(horaTxt).substring(0, 2), 10);
+                if (isNaN(hora) || hora < 0 || hora > 23) return;
+                porHora[hora] += parseFloat(v.monto_venta || 0);
+            });
+            return porHora;
+        }
+
+        function getVentasPorMaquina() {
+            const porMaquina = {};
+            getVentasPeriodo().forEach(v => {
+                const maquina = getMaquinaDeVenta(v);
+                const nombre = maquina?.nombre || (v.serial_amit ? `Serial ${normSerial(v.serial_amit)}` : 'Desconocida');
+                porMaquina[nombre] = (porMaquina[nombre] || 0) + parseFloat(v.monto_venta || 0);
+            });
+            return porMaquina;
+        }
+
+        function getVentasHoyPorEspacio(maquinaId) {
+            const res = {};
+            getVentasPeriodo().forEach(v => {
+                const m = getMaquinaDeVenta(v);
+                if (!m || String(m.id) !== String(maquinaId)) return;
+                const e = normEspacio(v.espacio);
+                if (!e) return;
+                res[e] = res[e] || { count: 0, unidades: 0, monto: 0 };
+                res[e].count++;
+                res[e].unidades += unidadesDeVenta(v);
+                res[e].monto += parseFloat(v.monto_venta || 0);
+            });
+            return res;
+        }
+
+        function getTopProductosHoy() {
+            const porProducto = {};
+            getVentasPeriodo().forEach(v => {
+                const producto = getProductoDeVenta(v);
+                const maquina = getMaquinaDeVenta(v);
+                const nombre = producto
+                    ? producto.nombre_producto
+                    : `Espacio ${normEspacio(v.espacio) || '?'}${maquina ? ' · ' + maquina.nombre : ''} (sin asignar)`;
+                porProducto[nombre] = porProducto[nombre] || { count: 0, monto: 0 };
+                porProducto[nombre].count += unidadesDeVenta(v);
+                porProducto[nombre].monto += parseFloat(v.monto_venta || 0);
+            });
+            return Object.entries(porProducto)
+                .map(([nombre, d]) => ({ nombre, count: d.count, monto: d.monto }))
+                .sort((a, b) => b.count - a.count || b.monto - a.monto)
+                .slice(0, 5);
+        }
+
+        function getHoraMayorVenta() {
+            const porHora = getVentasPorHora();
+            let maxHora = 0;
+            let maxMonto = 0;
+            for (let hora in porHora) {
+                if (porHora[hora] > maxMonto) {
+                    maxMonto = porHora[hora];
+                    maxHora = hora;
+                }
+            }
+            return { hora: parseInt(maxHora), monto: maxMonto };
+        }
+
+        function getMaquinaMasProductiva() {
+            const porMaquina = getVentasPorMaquina();
+            let maxMaquina = '';
+            let maxMonto = 0;
+            for (let maquina in porMaquina) {
+                if (porMaquina[maquina] > maxMonto) {
+                    maxMonto = porMaquina[maquina];
+                    maxMaquina = maquina;
+                }
+            }
+            return { nombre: maxMaquina, monto: maxMonto };
+        }
+
+        window.setPeriodo = function(p) {
+            state.periodo = PERIODOS[p] ? p : 'ultimo';
+            render();
+        };
+
+        // ============================================
+        // IMPORTAR VENTAS DESDE EL REPORTE DE PAYSCAN (.xlsx o .csv)
+        // ============================================
+        const SHEETJS_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+        const IMPORT_LOTE = 500;
+
+        // Nombre de columna del reporte → campo interno (se compara sin tildes ni mayúsculas)
+        const PAYSCAN_COLUMNAS = {
+            id_transaccion: ['id transaccion'],
+            fecha: ['fecha'],
+            hora: ['hora'],
+            resultado_transaccion: ['resultado transaccion'],
+            monto_venta: ['total transaccion'],
+            producto_codigo: ['producto'],
+            serial_amit: ['serial amit'],
+            serial_pos: ['serial pos'],
+            comision: ['total comision'],
+            neto_comision: ['neto comision'],
+            iva_comision: ['iva comision'],
+            metodo_pago: ['metodo de pago'],
+            marca_tarjeta: ['marca tarjeta'],
+            resultado_dispensado: ['resultado dispensado']
+        };
+        const PAYSCAN_OBLIGATORIAS = ['id_transaccion', 'fecha', 'monto_venta', 'producto_codigo', 'serial_amit'];
+
+        function normHeader(h) {
+            return String(h ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        }
+
+        function cargarScript(src) {
+            return new Promise((resolve, reject) => {
+                const s = document.createElement('script');
+                s.src = src;
+                s.onload = resolve;
+                s.onerror = () => reject(new Error('No se pudo cargar el lector de Excel. Revisa tu conexión.'));
+                document.head.appendChild(s);
+            });
+        }
+
+        async function asegurarSheetJS() {
+            if (typeof XLSX === 'undefined') await cargarScript(SHEETJS_URL);
+        }
+
+        // Montos: 1000 | "1000" | "1.000" | "$1.000" | "29,75" | "29.75"
+        function parseMonto(v) {
+            if (typeof v === 'number') return v;
+            let t = String(v ?? '').replace(/[$\s]/g, '');
+            if (!t) return 0;
+            if (/^-?\d{1,3}(\.\d{3})+(,\d+)?$/.test(t)) t = t.replace(/\./g, '').replace(',', '.');
+            else if (/^-?\d+,\d+$/.test(t)) t = t.replace(',', '.');
+            const n = parseFloat(t);
+            return isNaN(n) ? 0 : n;
+        }
+
+        function parseFechaImport(v) {
+            if (v instanceof Date && !isNaN(v)) {
+                return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+            }
+            if (typeof v === 'number' && typeof XLSX !== 'undefined') {
+                const d = XLSX.SSF.parse_date_code(v);
+                if (d) return `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
+            }
+            const t = String(v ?? '').trim();
+            let m = t.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+            m = t.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+            if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+            return '';
+        }
+
+        function parseHoraImport(v) {
+            if (v instanceof Date && !isNaN(v)) {
+                return [v.getHours(), v.getMinutes(), v.getSeconds()].map(x => String(x).padStart(2, '0')).join(':');
+            }
+            if (typeof v === 'number') {
+                const tot = Math.round((v % 1) * 86400);
+                return [Math.floor(tot / 3600), Math.floor((tot % 3600) / 60), tot % 60].map(x => String(x).padStart(2, '0')).join(':');
+            }
+            const m = String(v ?? '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+            return m ? `${m[1].padStart(2, '0')}:${m[2]}:${m[3] || '00'}` : '00:00:00';
+        }
+
+        function textoONull(v) {
+            const t = String(v ?? '').trim();
+            return t ? t : null;
+        }
+
+        // Convierte una fila del reporte en una fila de la tabla ventas_payscan
+        function mapFilaPayscan(fila, idx) {
+            const get = campo => fila[idx[campo]];
+            const fecha = parseFechaImport(get('fecha'));
+            const hora = parseHoraImport(get('hora'));
+            const serial = textoONull(get('serial_amit'));
+            const maquina = serial !== null ? state.maquinas.find(m => normSerial(m.serial_amit) === normSerial(serial)) : null;
+            return {
+                id_transaccion: textoONull(get('id_transaccion')),
+                fecha,
+                hora,
+                timestamp_completo: fecha ? `${fecha}T${hora}` : null,
+                serial_amit: serial,
+                serial_pos: textoONull(get('serial_pos')),
+                maquina_id: maquina ? String(maquina.id) : null,
+                espacio: decodeEspacioPayscan(get('producto_codigo')) || null,
+                producto_codigo: textoONull(get('producto_codigo')),
+                monto_venta: parseMonto(get('monto_venta')),
+                comision: parseMonto(get('comision')),
+                neto_comision: parseMonto(get('neto_comision')),
+                iva_comision: parseMonto(get('iva_comision')),
+                resultado_transaccion: (textoONull(get('resultado_transaccion')) || '').toUpperCase() || null,
+                resultado_dispensado: textoONull(get('resultado_dispensado')),
+                metodo_pago: textoONull(get('metodo_pago')),
+                marca_tarjeta: textoONull(get('marca_tarjeta'))
+            };
+        }
+
+        async function leerArchivoVentas(file) {
+            await asegurarSheetJS();
+            const esCsv = /\.csv$/i.test(file.name);
+            const wb = esCsv
+                ? XLSX.read(await file.text(), { type: 'string', raw: true })
+                : XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+            // Hoja "Transacciones" o la primera
+            const nombreHoja = wb.SheetNames.find(n => normHeader(n) === 'transacciones') || wb.SheetNames[0];
+            const matriz = XLSX.utils.sheet_to_json(wb.Sheets[nombreHoja], { header: 1, defval: null, raw: true, blankrows: false });
+            // Buscar la fila de encabezados (la que tenga "ID transaccion")
+            const filaEnc = matriz.findIndex(r => (r || []).some(c => normHeader(c) === 'id transaccion'));
+            if (filaEnc < 0) throw new Error('No encontré la columna "ID transaccion". ¿Es el reporte de transacciones de PayScan?');
+            const enc = matriz[filaEnc].map(normHeader);
+            const idx = {};
+            Object.entries(PAYSCAN_COLUMNAS).forEach(([campo, nombres]) => {
+                const i = enc.findIndex(h => nombres.includes(h));
+                if (i >= 0) idx[campo] = i;
+            });
+            const faltan = PAYSCAN_OBLIGATORIAS.filter(c => idx[c] === undefined);
+            if (faltan.length) throw new Error('Faltan columnas en el archivo: ' + faltan.join(', '));
+            return matriz.slice(filaEnc + 1)
+                .filter(r => r && r[idx.id_transaccion])
+                .map(r => mapFilaPayscan(r, idx));
+        }
+
+        async function idsYaImportados(ids) {
+            const existentes = new Set();
+            if (state.demoMode || !state.session) {
+                state.ventas.forEach(v => { if (v.id_transaccion) existentes.add(String(v.id_transaccion)); });
+                return existentes;
+            }
+            for (let i = 0; i < ids.length; i += 100) {
+                const lote = ids.slice(i, i + 100);
+                const { data, error } = await supabaseClient.from('ventas_payscan').select('id_transaccion').in('id_transaccion', lote);
+                if (error) throw new Error('No se pudo verificar duplicados: ' + error.message);
+                (data || []).forEach(r => existentes.add(String(r.id_transaccion)));
+            }
+            return existentes;
+        }
+
+        window.openImportModal = function() {
+            state.showImportModal = true;
+            state.importPreview = null;
+            state.importError = '';
+            render();
+        };
+
+        window.closeImportModal = function() {
+            if (state.importLoading) return;
+            state.showImportModal = false;
+            state.importPreview = null;
+            state.importError = '';
+            render();
+        };
+
+        window.handleImportFile = async function(input) {
+            const file = input && input.files && input.files[0];
+            if (!file) return;
+            state.importLoading = true;
+            state.importError = '';
+            state.importPreview = null;
+            render();
+            try {
+                const filas = await leerArchivoVentas(file);
+                const validas = filas.filter(f => f.id_transaccion && f.fecha);
+                const invalidas = filas.length - validas.length;
+                // Quitar repetidos dentro del mismo archivo
+                const unicas = [...new Map(validas.map(f => [f.id_transaccion, f])).values()];
+                const existentes = await idsYaImportados(unicas.map(f => f.id_transaccion));
+                const nuevas = unicas.filter(f => !existentes.has(String(f.id_transaccion)));
+                const aprobadas = nuevas.filter(f => f.resultado_transaccion === 'APPROVED');
+                const fechas = unicas.map(f => f.fecha).sort();
+                const porMaquina = {};
+                const sinMaquina = new Set();
+                aprobadas.forEach(f => {
+                    const m = f.maquina_id ? state.maquinas.find(x => String(x.id) === f.maquina_id) : null;
+                    const nombre = m ? m.nombre : `Serial ${normSerial(f.serial_amit)} (sin máquina)`;
+                    if (!m) sinMaquina.add(f.serial_amit);
+                    porMaquina[nombre] = porMaquina[nombre] || { count: 0, monto: 0 };
+                    porMaquina[nombre].count++;
+                    porMaquina[nombre].monto += f.monto_venta;
+                });
+                state.importPreview = {
+                    archivo: file.name,
+                    total: filas.length,
+                    invalidas,
+                    duplicadas: unicas.length - nuevas.length,
+                    nuevas,
+                    aprobadas: aprobadas.length,
+                    otras: nuevas.length - aprobadas.length,
+                    montoAprobado: aprobadas.reduce((s, f) => s + f.monto_venta, 0),
+                    desde: fechas[0],
+                    hasta: fechas[fechas.length - 1],
+                    porMaquina,
+                    sinMaquina: [...sinMaquina],
+                    sinEspacio: nuevas.filter(f => !f.espacio).length
+                };
+            } catch (err) {
+                console.error(err);
+                state.importError = err.message || 'No se pudo leer el archivo.';
+            } finally {
+                state.importLoading = false;
+                render();
+            }
+        };
+
+        window.confirmarImport = async function() {
+            const prev = state.importPreview;
+            if (!prev || !prev.nuevas.length) return;
+            if (!puedeEscribir()) return;
+            state.importLoading = true;
+            state.importError = '';
+            render();
+            let insertadas = 0;
+            try {
+                for (let i = 0; i < prev.nuevas.length; i += IMPORT_LOTE) {
+                    const lote = prev.nuevas.slice(i, i + IMPORT_LOTE);
+                    // ignoreDuplicates: si alguna ya existe (otro usuario importó recién), se omite sin error
+                    const { error } = await supabaseClient
+                        .from('ventas_payscan')
+                        .upsert(lote, { onConflict: 'id_transaccion', ignoreDuplicates: true });
+                    if (error) throw new Error(`Error en el lote ${i / IMPORT_LOTE + 1}: ${error.message}`);
+                    insertadas += lote.length;
+                }
+                guardarHistorial('IMPORTAR_VENTAS', `${prev.archivo}: ${insertadas} transacciones nuevas (${fmtFecha(prev.desde)} al ${fmtFecha(prev.hasta)})`);
+                state.importLoading = false;
+                state.showImportModal = false;
+                state.importPreview = null;
+                state.periodo = 'ultimo';
+                await fetchVentas();
+                render();
+                alert(`✅ ${insertadas} transacciones importadas`);
+            } catch (err) {
+                console.error(err);
+                state.importLoading = false;
+                state.importError = err.message + (insertadas ? ` (se alcanzaron a guardar ${insertadas}; puedes volver a importar el mismo archivo, no se duplicarán)` : '');
+                render();
+            }
+        };
+
+        function renderImportModal() {
+            if (!state.showImportModal) return '';
+            const p = state.importPreview;
+            return `
+                <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                        <div class="bg-green-700 text-white p-4 flex justify-between items-center sticky top-0">
+                            <h3 class="text-xl font-bold">📥 Importar ventas PayScan</h3>
+                            <button onclick="window.closeImportModal()" class="text-2xl font-bold" aria-label="Cerrar">✕</button>
+                        </div>
+                        <div class="p-6 space-y-4">
+                            <p class="text-sm text-gray-600">Sube el reporte de transacciones que te llega por correo (<strong>.xlsx</strong> o <strong>.csv</strong>). Las transacciones ya importadas se omiten automáticamente, así que puedes subir reportes que se traslapen.</p>
+                            <label class="block">
+                                <span class="text-sm font-bold text-gray-700">Archivo</span>
+                                <input type="file" id="importFile" accept=".xlsx,.xls,.csv" onchange="window.handleImportFile(this)" ${state.importLoading ? 'disabled' : ''}
+                                    class="mt-1 block w-full text-sm border rounded p-2 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:bg-green-600 file:text-white file:font-bold">
+                            </label>
+                            ${state.importLoading ? `<div class="p-4 bg-blue-50 border border-blue-200 rounded text-sm">⏳ Procesando…</div>` : ''}
+                            ${state.importError ? `<div class="p-4 bg-red-50 border border-red-300 rounded text-sm text-red-800" role="alert">❌ ${esc(state.importError)}</div>` : ''}
+                            ${p ? `
+                                <div class="p-4 bg-gray-50 border rounded space-y-2 text-sm">
+                                    <div class="font-bold text-base">${esc(p.archivo)}</div>
+                                    <div>Período del archivo: <strong>${fmtFecha(p.desde)} al ${fmtFecha(p.hasta)}</strong></div>
+                                    <div>Filas leídas: <strong>${p.total}</strong>${p.invalidas ? ` · <span class="text-red-700">${p.invalidas} sin ID o fecha (se omiten)</span>` : ''}</div>
+                                    <div>Ya importadas antes: <strong>${p.duplicadas}</strong> (se omiten)</div>
+                                    <div class="text-green-800">Nuevas a importar: <strong>${p.nuevas.length}</strong> → ${p.aprobadas} aprobadas por <strong>$${clp(p.montoAprobado)}</strong>${p.otras ? ` + ${p.otras} rechazadas/anuladas (se guardan, pero no suman ventas)` : ''}</div>
+                                </div>
+                                ${Object.keys(p.porMaquina).length ? `
+                                    <table class="w-full text-sm border">
+                                        <thead class="bg-gray-100"><tr><th class="text-left p-2">Máquina</th><th class="text-right p-2">Ventas</th><th class="text-right p-2">Monto</th></tr></thead>
+                                        <tbody>
+                                            ${Object.entries(p.porMaquina).map(([n, d]) => `<tr class="border-t"><td class="p-2">${esc(n)}</td><td class="p-2 text-right">${d.count}</td><td class="p-2 text-right">$${clp(d.monto)}</td></tr>`).join('')}
+                                        </tbody>
+                                    </table>
+                                ` : ''}
+                                ${p.sinMaquina.length ? `<div class="p-3 bg-orange-50 border border-orange-300 rounded text-sm text-orange-900">⚠️ Serial AMIT sin máquina registrada: <strong>${p.sinMaquina.map(esc).join(', ')}</strong>. Se importan igual; créala en <em>Máquinas</em> con ese serial y se asociarán solas.</div>` : ''}
+                                ${p.sinEspacio ? `<div class="p-3 bg-orange-50 border border-orange-300 rounded text-sm text-orange-900">⚠️ ${p.sinEspacio} transacciones sin espacio reconocible en la columna "Producto".</div>` : ''}
+                                <div class="flex gap-3">
+                                    <button onclick="window.confirmarImport()" ${!p.nuevas.length || state.importLoading ? 'disabled' : ''} class="flex-1 bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold disabled:opacity-50 disabled:cursor-not-allowed">
+                                        ${p.nuevas.length ? `✅ Importar ${p.nuevas.length} transacciones` : 'Nada nuevo que importar'}
+                                    </button>
+                                    <button onclick="window.closeImportModal()" class="flex-1 bg-gray-600 text-white py-3 rounded hover:bg-gray-700 font-bold">Cancelar</button>
+                                </div>
+                            ` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // ============================================
+        // INICIALIZAR GRÁFICOS (Chart.js)
+        // ============================================
+        const chartInstances = {};
+
+        window.initCharts = function() {
+            if (typeof Chart === 'undefined') return;
+            // Destruir gráficos previos (render() recrea el canvas; evita fugas de memoria / "Canvas is already in use")
+            Object.keys(chartInstances).forEach(k => {
+                try { chartInstances[k].destroy(); } catch (e) {}
+                delete chartInstances[k];
+            });
+
+            // Gráfico 1: Ventas por Hora
+            const ventasPorHora = getVentasPorHora();
+            const horasLabels = Array.from({length: 24}, (_, i) => `${i}:00`);
+            const horasData = Object.values(ventasPorHora);
+
+            const ctx1 = document.getElementById('chartVentasHora');
+            if (ctx1) {
+                chartInstances.hora = new Chart(ctx1, {
+                    type: 'line',
+                    data: {
+                        labels: horasLabels,
+                        datasets: [{
+                            label: 'Ventas por Hora',
+                            data: horasData,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 5,
+                            pointBackgroundColor: '#3b82f6',
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 2
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: true, position: 'top' },
+                            title: { display: false }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                ticks: { callback: v => '$' + v.toLocaleString('es-CL') }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Gráfico 2: Ventas por Máquina
+            const porMaquina = getVentasPorMaquina();
+            const maquinasLabels = Object.keys(porMaquina);
+            const maquinasData = Object.values(porMaquina);
+
+            const ctx2 = document.getElementById('chartVentasMaquina');
+            if (ctx2) {
+                chartInstances.maquina = new Chart(ctx2, {
+                    type: 'bar',
+                    data: {
+                        labels: maquinasLabels,
+                        datasets: [{
+                            label: 'Ventas por Máquina',
+                            data: maquinasData,
+                            backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: true, position: 'top' }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { callback: v => '$' + v.toLocaleString('es-CL') }
+                            }
+                        }
+                    }
+                });
+            }
+        };
+
+        // ============================================
+        // RENDER - INICIO
+        // ============================================
+        function renderDashboard() {
+            const totalVentasHoy = getTotalVentasHoy();
+            const transaccionesHoy = getTransaccionesHoy();
+            const ticketPromedio = getTicketPromedio();
+            const comparativa = getComparativaHoyVsAyer();
+            const maquinaMasProductiva = getMaquinaMasProductiva();
+            const topProductos = getTopProductosHoy();
+            const stockCritico = getStockCritico();
+            const horaMayorVenta = getHoraMayorVenta();
+
+            const compColor = comparativa.estado === 'positivo' ? 'text-green-600' : comparativa.estado === 'negativo' ? 'text-red-600' : 'text-gray-500';
+            const compFlecha = comparativa.estado === 'positivo' ? '▲' : comparativa.estado === 'negativo' ? '▼' : '●';
+            const compTexto = comparativa.estado === 'positivo' ? 'Aumento' : comparativa.estado === 'negativo' ? 'Disminución' : comparativa.estado === 'igual' ? 'Sin cambio' : 'Sin ventas en el período anterior';
+            const rango = getRangoPeriodo();
+            const ultimaVenta = getUltimaVenta();
+            const unidadesPeriodo = getVentasPeriodo().reduce((s, v) => s + unidadesDeVenta(v), 0);
+
+            return `
+                <div class="space-y-6">
+                    <!-- BARRA: período + importación -->
+                    <div class="bg-white p-4 rounded-lg shadow flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex flex-wrap items-center gap-3">
+                            <label class="text-sm font-bold text-gray-700" for="selPeriodo">Período</label>
+                            <select id="selPeriodo" onchange="window.setPeriodo(this.value)" class="border p-2 rounded text-sm">
+                                ${Object.entries(PERIODOS).map(([k, t]) => `<option value="${k}" ${rango.periodo === k ? 'selected' : ''}>${t}</option>`).join('')}
+                            </select>
+                            <span class="text-sm text-gray-600">${rango.label}</span>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-3">
+                            <span class="text-xs text-gray-500">Ventas importadas hasta: <strong>${ultimaVenta ? fmtFecha(ultimaVenta) + ' ' + String(ultimaVenta).substring(11, 16) : 'sin datos'}</strong></span>
+                            <button onclick="window.openImportModal()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 font-bold text-sm">
+                                📥 Importar ventas PayScan
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- KPI EJECUTIVOS PRINCIPALES -->
+                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <div class="stat-card bg-gradient-to-br from-blue-50 to-blue-100 border-2 border-blue-200 p-6 rounded-lg shadow-md">
+                            <div class="text-xs font-semibold text-blue-600 uppercase mb-2">💰 Ventas del período</div>
+                            <div class="text-4xl font-bold text-blue-900">$${clp(totalVentasHoy)}</div>
+                            <div class="text-xs text-blue-700 mt-2">${transaccionesHoy} transacciones · ${unidadesPeriodo} unidades</div>
+                        </div>
+                        
+                        <div class="stat-card bg-gradient-to-br from-green-50 to-green-100 border-2 border-green-200 p-6 rounded-lg shadow-md">
+                            <div class="text-xs font-semibold text-green-600 uppercase mb-2">📊 Ticket Promedio</div>
+                            <div class="text-4xl font-bold text-green-900">$${ticketPromedio.toLocaleString('es-CL', {maximumFractionDigits: 0})}</div>
+                            <div class="text-xs text-green-700 mt-2">Por transacción</div>
+                        </div>
+                        
+                        <div class="stat-card bg-gradient-to-br from-purple-50 to-purple-100 border-2 border-purple-200 p-6 rounded-lg shadow-md">
+                            <div class="text-xs font-semibold text-purple-600 uppercase mb-2">⏰ Hora Peak</div>
+                            <div class="text-4xl font-bold text-purple-900">${horaMayorVenta.monto > 0 ? horaMayorVenta.hora + ':00' : '—'}</div>
+                            <div class="text-xs text-purple-700 mt-2">$${clp(horaMayorVenta.monto)}</div>
+                        </div>
+                        
+                        <div class="stat-card bg-gradient-to-br from-orange-50 to-orange-100 border-2 border-orange-200 p-6 rounded-lg shadow-md">
+                            <div class="text-xs font-semibold text-orange-600 uppercase mb-2">🏆 Máquina Top</div>
+                            <div class="text-2xl font-bold text-orange-900">${esc(maquinaMasProductiva.nombre) || 'N/A'}</div>
+                            <div class="text-xs text-orange-700 mt-2">$${clp(maquinaMasProductiva.monto)}</div>
+                        </div>
+                    </div>
+
+                    <!-- COMPARATIVA vs PERÍODO ANTERIOR -->
+                    <div class="bg-white p-6 rounded-lg shadow-md border-l-4 ${comparativa.estado === 'positivo' ? 'border-green-500' : comparativa.estado === 'negativo' ? 'border-red-500' : 'border-gray-300'}">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h3 class="font-bold text-lg mb-2">📈 Comparativa vs período anterior</h3>
+                                <div class="text-sm text-gray-600">
+                                    ${rango.label}: <span class="font-bold">$${clp(comparativa.monto_hoy)}</span> |
+                                    ${rango.prevLabel}: <span class="font-bold">$${clp(comparativa.monto_ayer)}</span>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-3xl font-bold ${compColor}">
+                                    ${comparativa.estado === 'sin_comparar' ? '—' : `${compFlecha} ${Math.abs(comparativa.porcentaje)}%`}
+                                </div>
+                                <div class="text-xs text-gray-500">${compTexto}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Gráfico Ventas por Hora -->
+                        <div class="bg-white p-6 rounded-lg shadow-md">
+                            <h3 class="font-bold mb-4 text-lg">📊 Ventas por hora ${rango.dias > 1 ? '(suma del período)' : ''}</h3>
+                            <div style="position: relative; height: 300px;">
+                                <canvas id="chartVentasHora"></canvas>
+                            </div>
+                        </div>
+
+                        <!-- Gráfico Ventas por Máquina -->
+                        <div class="bg-white p-6 rounded-lg shadow-md">
+                            <h3 class="font-bold mb-4 text-lg">🤖 Ventas por Máquina</h3>
+                            <div style="position: relative; height: 300px;">
+                                <canvas id="chartVentasMaquina"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Top 5 Productos Vendidos -->
+                        <div class="bg-white p-6 rounded-lg shadow-md">
+                            <h3 class="font-bold mb-4 text-lg">🏅 Top 5 productos (unidades)</h3>
+                            ${topProductos.length > 0 ? `
+                                <div class="space-y-2">
+                                    ${topProductos.map((p, i) => `
+                                        <div class="flex justify-between items-center p-3 bg-gradient-to-r from-blue-50 to-blue-100 rounded">
+                                            <span class="text-sm font-semibold">${i+1}. ${esc(p.nombre)}</span>
+                                            <span class="text-sm font-bold bg-blue-500 text-white px-3 py-1 rounded-full" title="$${clp(p.monto)}">${p.count}</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            ` : `<p class="text-gray-500 text-sm">Sin ventas en este período</p>`}
+                        </div>
+
+                        <!-- Stock Crítico y Alertas -->
+                        <div class="bg-white p-6 rounded-lg shadow-md">
+                            <h3 class="font-bold mb-4 text-lg">⚠️ Stock Crítico</h3>
+                            ${stockCritico.length > 0 ? `
+                                <div class="space-y-2">
+                                    ${stockCritico.map(p => `
+                                        <div class="flex justify-between items-center p-3 bg-red-50 border-l-4 border-red-500 rounded">
+                                            <span class="text-sm font-semibold text-red-900">${esc(p.nombre_producto)}</span>
+                                            <span class="text-sm font-bold text-red-600">${Number(p.cantidad_actual) || 0} unid.</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            ` : `<p class="text-gray-500 text-sm">✓ Todo el stock está bien</p>`}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderAnalytics() {
+            return `
+                <div class="bg-white p-6 rounded-lg shadow">
+                    <h2 class="text-2xl font-bold mb-4">📈 Analítica Detallada</h2>
+                    <p class="text-gray-600 mb-4">Sección en desarrollo con análisis profundos de tendencias.</p>
+                    <div class="mt-6 p-4 bg-blue-50 rounded border border-blue-200">
+                        <h3 class="font-bold mb-2">Próximas secciones:</h3>
+                        <ul class="text-sm space-y-1">
+                            <li>✓ Ventas por mes (últimos 12 meses)</li>
+                            <li>✓ Comparativa Parque Lomas vs Edificio New</li>
+                            <li>✓ Análisis de espacios más vendidos</li>
+                            <li>✓ Margen bruto/neto por máquina</li>
+                            <li>✓ KPI: Comisión pagada vs ingreso neto</li>
+                        </ul>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Campos del formulario de producto (compartido entre "Nuevo" y "Editar")
+        function renderProductFields(familiasForm, isEdit) {
+            const np = state.newProduct;
+            const familias = np.familia && !familiasForm.includes(np.familia) ? [...familiasForm, np.familia] : familiasForm;
+            const field = (label, html) => `<label class="flex flex-col gap-1 text-xs font-bold text-gray-600">${label}${html}</label>`;
+            return `
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    ${field('SKU', `<input type="text" placeholder="SKU" value="${esc(np.sku)}" oninput="window.updateNewProduct('sku', this.value)" class="border p-3 rounded font-normal text-sm ${isEdit ? 'bg-gray-100' : ''}" ${isEdit ? 'disabled' : ''}>`)}
+                    ${field('Nombre producto', `<input type="text" placeholder="Nombre Producto" value="${esc(np.nombre_producto)}" oninput="window.updateNewProduct('nombre_producto', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                    ${field('Familia', `<select onchange="window.updateNewProduct('familia', this.value)" class="border p-3 rounded font-normal text-sm">
+                        ${familias.map(f => `<option value="${esc(f)}" ${np.familia === f ? 'selected' : ''}>${esc(f)}</option>`).join('')}
+                    </select>`)}
+                    ${field('Precio compra', `<input type="number" min="0" placeholder="Precio Compra" value="${esc(np.precio_compra_unitario)}" oninput="window.updateNewProduct('precio_compra_unitario', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                    ${field('Precio venta', `<input type="number" min="0" placeholder="Precio Venta" value="${esc(np.precio_venta_unitario)}" oninput="window.updateNewProduct('precio_venta_unitario', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                    ${field('Cantidad', `<input type="number" min="0" placeholder="Cantidad" value="${esc(np.cantidad_actual)}" oninput="window.updateNewProduct('cantidad_actual', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                    ${field('Fecha compra', `<input type="date" value="${esc(np.fecha_compra)}" oninput="window.updateNewProduct('fecha_compra', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                    ${field('Fecha caducidad', `<input type="date" value="${esc(np.fecha_caducidad)}" oninput="window.updateNewProduct('fecha_caducidad', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                    ${field('Proveedor', `<input type="text" placeholder="Proveedor" value="${esc(np.proveedor)}" oninput="window.updateNewProduct('proveedor', this.value)" class="border p-3 rounded font-normal text-sm">`)}
+                </div>
+            `;
+        }
+
+        function renderInventario() {
+            const filtered = getFilteredInventario();
+            const familias = ['Todos', ...new Set(state.inventario.map(p => p.familia).filter(Boolean))];
+            const proveedores = ['Todos', ...new Set(state.inventario.map(p => p.proveedor).filter(Boolean))];
+            // Familias del formulario: base + las que ya existan en la BD (antes "Confites" no aparecía y se perdía al editar)
+            const familiasForm = [...new Set(['Snacks', 'Bebidas', 'Proteína', 'Dulces', 'Confites', ...state.inventario.map(p => p.familia).filter(Boolean)])];
+
+            return `
+                <div class="space-y-6">
+                    <div class="flex gap-2 flex-wrap">
+                        <button onclick="window.toggleNewProductForm()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 font-bold">
+                            ${state.showNewProductForm ? '❌ Cancelar' : '➕ Nuevo Producto'}
+                        </button>
+                        <button onclick="window.openScannerModal()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 font-bold">
+                            📷 Escanear Código
+                        </button>
+                        <button onclick="window.exportarInventarioCSV()" class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 font-bold">
+                            📥 Exportar CSV
+                        </button>
+                    </div>
+
+                    <div class="bg-white p-4 rounded-lg shadow space-y-3">
+                        <input type="text" id="searchInput" placeholder="🔍 Buscar por SKU o nombre..." value="${esc(state.searchQuery)}" oninput="window.updateSearchQuery(this.value)" class="w-full border p-3 rounded">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <select onchange="window.updateFilter('familia', this.value)" class="border p-3 rounded">
+                                ${familias.map(f => `<option value="${esc(f)}" ${state.filterFamilia === f ? 'selected' : ''}>${esc(f)}</option>`).join('')}
+                            </select>
+                            <select onchange="window.updateFilter('proveedor', this.value)" class="border p-3 rounded">
+                                ${proveedores.map(p => `<option value="${esc(p)}" ${state.filterProveedor === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}
+                            </select>
+                            <select onchange="window.updateFilter('estado', this.value)" class="border p-3 rounded">
+                                <option value="Todos" ${state.filterEstado === 'Todos' ? 'selected' : ''}>Todos</option>
+                                <option value="Bajo Stock" ${state.filterEstado === 'Bajo Stock' ? 'selected' : ''}>Bajo Stock</option>
+                                <option value="Por Vencer" ${state.filterEstado === 'Por Vencer' ? 'selected' : ''}>Por Vencer</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    ${state.showNewProductForm ? `
+                        <div class="bg-white p-6 rounded-lg shadow">
+                            <h3 class="text-xl font-bold mb-4">Agregar Nuevo Producto</h3>
+                            ${renderProductFields(familiasForm, false)}
+                            <button onclick="window.addProduct()" class="w-full mt-4 bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold">
+                                ✅ Agregar Producto
+                            </button>
+                        </div>
+                    ` : ''}
+
+                    <div class="bg-white rounded-lg shadow overflow-x-auto">
+                        <table class="w-full">
+                            <thead class="bg-gray-100 border-b">
+                                <tr>
+                                    <th class="px-4 py-3 text-left text-sm font-bold">SKU</th>
+                                    <th class="px-4 py-3 text-left text-sm font-bold">Nombre</th>
+                                    <th class="px-4 py-3 text-left text-sm font-bold">Familia</th>
+                                    <th class="px-4 py-3 text-right text-sm font-bold">Cantidad</th>
+                                    <th class="px-4 py-3 text-right text-sm font-bold">Precio Venta</th>
+                                    <th class="px-4 py-3 text-left text-sm font-bold">Vencimiento</th>
+                                    <th class="px-4 py-3 text-center text-sm font-bold">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${filtered.length === 0 ? `
+                                    <tr><td colspan="7" class="px-4 py-6 text-center text-sm text-gray-500">No hay productos que coincidan con los filtros</td></tr>
+                                ` : filtered.map(p => {
+                                    let colorVenc = 'bg-gray-50';
+                                    // Antes un producto sin fecha se pintaba rojo (new Date(null) = 1970)
+                                    if (p.fecha_caducidad) {
+                                        const venc = new Date(p.fecha_caducidad);
+                                        const dias = (venc - new Date()) / (1000 * 60 * 60 * 24);
+                                        if (dias < 7) colorVenc = 'bg-red-50';
+                                        else if (dias < 30) colorVenc = 'bg-yellow-50';
+                                    }
+
+                                    return `
+                                        <tr class="${colorVenc}">
+                                            <td class="px-4 py-3 text-sm font-mono">${esc(p.sku)}</td>
+                                            <td class="px-4 py-3 text-sm">${esc(p.nombre_producto)}</td>
+                                            <td class="px-4 py-3 text-sm">${esc(p.familia)}</td>
+                                            <td class="px-4 py-3 text-sm text-right font-bold">${Number(p.cantidad_actual) || 0}</td>
+                                            <td class="px-4 py-3 text-sm text-right">$${clp(p.precio_venta_unitario)}</td>
+                                            <td class="px-4 py-3 text-sm">${esc(p.fecha_caducidad) || '—'}</td>
+                                            <td class="px-4 py-3 text-center">
+                                                <div class="flex gap-1 justify-center">
+                                                    <button onclick="window.openEditProductModal('${esc(p.id)}')" class="bg-blue-600 text-white px-2 py-1 rounded text-xs hover:bg-blue-700" aria-label="Editar">✏️</button>
+                                                    <button onclick="window.deleteProduct('${esc(p.id)}')" class="bg-red-600 text-white px-2 py-1 rounded text-xs hover:bg-red-700" aria-label="Eliminar">🗑️</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="text-sm text-gray-600 text-right">Total: ${filtered.length} productos</div>
+                </div>
+            `;
+        }
+
+        function renderAsignaciones() {
+            if (!state.selectedMachineForAssignment) {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold">🎯 Asignación Detallada de Máquinas</h2>
+                        <p class="text-gray-600">Selecciona una máquina para ver y editar la asignación de productos en cada espacio</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            ${state.maquinas.map(maquina => {
+                                const asignacionesMaquina = state.asignaciones.filter(a => String(a.maquina_id) === String(maquina.id));
+                                return `
+                                    <div class="bg-white p-6 rounded-lg shadow cursor-pointer hover:shadow-xl transition-all border-2 border-transparent hover:border-blue-500" onclick="window.selectMachineForAssignment('${maquina.id}')">
+                                        <h3 class="font-bold text-lg mb-2">📍 ${esc(maquina.nombre)}</h3>
+                                        <p class="text-sm text-gray-600 mb-4">${esc(maquina.ubicacion)}</p>
+                                        <div class="bg-gradient-to-r from-blue-50 to-blue-100 p-3 rounded text-sm">
+                                            <div><strong>${asignacionesMaquina.length}</strong> espacios asignados</div>
+                                            <div><strong>${maquina.total_filas || 6} bandejas</strong> × <strong>${maquina.total_columnas || 10} posiciones</strong></div>
+                                            <div class="mt-2">Click para gestionar →</div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            const maquina = state.maquinas.find(m => String(m.id) === String(state.selectedMachineForAssignment));
+            if (!maquina) return '<div>Máquina no encontrada</div>';
+
+            const filas = maquina.total_filas || 6;
+            const columnas = maquina.total_columnas || 10;
+            const asignacionesMaquina = state.asignaciones.filter(a => String(a.maquina_id) === String(maquina.id));
+            const ventasPorEspacio = getVentasHoyPorEspacio(maquina.id);
+            const ventasHoyMaquina = Object.values(ventasPorEspacio).reduce((acc, v) => ({ count: acc.count + v.count, unidades: acc.unidades + v.unidades, monto: acc.monto + v.monto }), { count: 0, unidades: 0, monto: 0 });
+            // Ventas en espacios sin producto asignado = algo no cuadra (asignación faltante o espacio mal configurado)
+            const ventasSinAsignar = Object.keys(ventasPorEspacio).filter(e => !asignacionesMaquina.some(a => normEspacio(a.espacio) === e));
+
+            return `
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h2 class="text-2xl font-bold">📍 ${esc(maquina.nombre)}</h2>
+                            <p class="text-gray-600">${esc(maquina.ubicacion)}</p>
+                        </div>
+                        <button onclick="window.closeMachineAssignmentModal()" class="bg-gray-600 text-white px-6 py-3 rounded hover:bg-gray-700 font-bold">
+                            ← Volver
+                        </button>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-lg shadow">
+                        <h3 class="text-lg font-bold mb-4">🎯 Grid de Asignaciones (${filas} bandejas × ${columnas} posiciones)</h3>
+                        <p class="text-sm text-gray-600 mb-6">Haz click en cualquier espacio para asignar o editar un producto</p>
+
+                        <div class="overflow-x-auto">
+                            <div class="inline-block min-w-full">
+                                ${Array.from({ length: filas }).map((_, filaIdx) => `
+                                    <div class="flex gap-1 mb-1">
+                                        <div class="w-16 flex items-center justify-center font-bold text-gray-600 text-xs text-center">Bandeja ${filaIdx + 1}</div>
+                                        ${Array.from({ length: columnas }).map((_, colIdx) => {
+                                            const espacio = codigoEspacio(filaIdx + 1, colIdx + 1);
+                                            const assignment = asignacionesMaquina.find(a => normEspacio(a.espacio) === espacio);
+                                            const vendidosHoy = (ventasPorEspacio[espacio] || { unidades: 0 }).unidades;
+                                            const product = assignment ? state.inventario.find(p => String(p.sku) === String(assignment.sku)) : null;
+                                            
+                                            return `
+                                                <button type="button" class="grid-cell-large ${assignment ? 'occupied-lg' : 'empty-lg'}"
+                                                     onclick="window.openEditAssignmentModal('${esc(maquina.id)}', '${espacio}')">
+                                                    <div class="text-center">
+                                                        <div class="text-xs font-bold ${assignment ? 'text-blue-100' : 'text-gray-500'} mb-1">${espacio}</div>
+                                                        ${assignment ? `
+                                                            <div class="text-xs font-bold">${esc(String(product ? product.nombre_producto : assignment.sku + ' (sin stock)').substring(0, 14))}</div>
+                                                            <div class="text-lg font-bold text-white">${Number(assignment.cantidad_asignada) || 0}</div>
+                                                        ` : `
+                                                            <div class="text-xs text-gray-400">Vacío</div>
+                                                        `}
+                                                        ${vendidosHoy ? `<div class="mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${assignment ? 'bg-white text-blue-700' : 'bg-orange-100 text-orange-800'}">${vendidosHoy} vend.</div>` : ''}
+                                                    </div>
+                                                </button>
+                                            `;
+                                        }).join('')}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <div class="mt-6 p-4 bg-blue-50 rounded border border-blue-200">
+                            <div class="text-sm">
+                                <div class="font-bold mb-2">📊 Resumen:</div>
+                                <div>Total espacios: <strong>${filas * columnas}</strong></div>
+                                <div>Espacios asignados: <strong>${asignacionesMaquina.length}</strong></div>
+                                <div>Espacios vacíos: <strong>${filas * columnas - asignacionesMaquina.length}</strong></div>
+                                <div class="mt-2">Ocupación: <strong>${Math.round((asignacionesMaquina.length / (filas * columnas)) * 100)}%</strong></div>
+                                <div class="mt-2">Ventas en el período (${getRangoPeriodo().label}): <strong>${ventasHoyMaquina.unidades} unidades</strong> en ${ventasHoyMaquina.count} transacciones ($${clp(ventasHoyMaquina.monto)})</div>
+                                <div class="mt-2 text-xs text-gray-600">Numeración TCN: espacio = (bandeja − 1) × 10 + posición. Bandeja 1 = 1–${columnas}, Bandeja 2 = 11–${10 + columnas}… El período se cambia en el Dashboard.</div>
+                            </div>
+                        </div>
+                        ${ventasSinAsignar.length ? `
+                            <div class="mt-4 p-4 bg-orange-50 rounded border border-orange-300 text-sm text-orange-900">
+                                ⚠️ En el período hubo ventas en espacios sin producto asignado: <strong>${ventasSinAsignar.map(esc).join(', ')}</strong>. Asigna el producto para que el dashboard pueda identificar qué se vendió.
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderHistorial() {
+            return `
+                <div class="space-y-4">
+                    <h2 class="text-2xl font-bold">📋 Historial de Cambios</h2>
+                    <div class="bg-white rounded-lg shadow">
+                        ${state.historial.length === 0 ? `
+                            <div class="p-6 text-center text-gray-500">
+                                No hay movimientos registrados
+                            </div>
+                        ` : `
+                            <div class="divide-y">
+                                ${state.historial.slice(0, 50).map(h => `
+                                    <div class="p-4">
+                                        <div class="flex justify-between items-start mb-2">
+                                            <div class="font-bold text-sm">${esc(h.accion)}</div>
+                                            <div class="text-xs text-gray-500">${new Date(h.timestamp).toLocaleString('es-CL')}</div>
+                                        </div>
+                                        <div class="text-sm text-gray-600">
+                                            <span class="font-semibold">${esc(h.usuario)}</span> - ${esc(h.detalles)}
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        `}
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderMaquinas() {
+            return `
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-2xl font-bold">⚙️ Configuración de Máquinas</h2>
+                        <button onclick="window.toggleAddMachineForm()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 font-bold">
+                            ${state.showAddMachineForm ? '❌ Cancelar' : '➕ Nueva Máquina'}
+                        </button>
+                    </div>
+
+                    ${state.showAddMachineForm ? `
+                        <div class="bg-white p-6 rounded-lg shadow">
+                            <h3 class="text-xl font-bold mb-6">📋 Agregar Nueva Máquina</h3>
+                            
+                            <div class="space-y-5">
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-2">📌 Nombre de Máquina <span class="text-red-600">*</span></label>
+                                    <input type="text" placeholder="Ej: MAQ-001, MAQ-002, Parque Lomas..." value="${esc(state.newMachine.nombre)}" oninput="window.updateNewMachine('nombre', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <p class="text-xs text-gray-500 mt-1">Identificador único para esta máquina</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-2">🔐 Serial AMIT <span class="text-red-600">*</span></label>
+                                    <input type="text" placeholder="Ej: 0000000000440864" value="${esc(state.newMachine.serial_amit)}" oninput="window.updateNewMachine('serial_amit', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono">
+                                    <p class="text-xs text-gray-500 mt-1">Código del PayScan asociado a la máquina (se usa para cruzar las ventas)</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-2">📍 Ubicación <span class="text-red-600">*</span></label>
+                                    <input type="text" placeholder="Ej: San Pedro de la Paz, Talcahuano, Hualpén..." value="${esc(state.newMachine.ubicacion)}" oninput="window.updateNewMachine('ubicacion', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <p class="text-xs text-gray-500 mt-1">Dirección o zona donde está instalada la máquina</p>
+                                </div>
+
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-2">📏 Bandejas</label>
+                                        <input type="number" placeholder="6" value="${state.newMachine.total_filas}" oninput="window.updateNewMachine('total_filas', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-lg" min="1" max="9">
+                                        <p class="text-xs text-gray-500 mt-1">Bandejas de arriba hacia abajo (máx. 9). Tus TCN: 6</p>
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-2">📊 Posiciones por bandeja</label>
+                                        <input type="number" placeholder="10" value="${state.newMachine.total_columnas}" oninput="window.updateNewMachine('total_columnas', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-lg" min="1" max="10">
+                                        <p class="text-xs text-gray-500 mt-1">Motores por bandeja (máx. 10). La numeración avanza de 10 en 10 por bandeja</p>
+                                    </div>
+
+                                    <div>
+                                        <label class="block text-sm font-bold text-gray-700 mb-2">📦 Productos por Espacio</label>
+                                        <input type="number" placeholder="1" value="${state.newMachine.productos_por_slot}" oninput="window.updateNewMachine('productos_por_slot', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-center text-lg" min="1">
+                                        <p class="text-xs text-gray-500 mt-1">Cuántos productos caben por espacio (1-2)</p>
+                                    </div>
+                                </div>
+
+                                <div class="bg-blue-50 p-4 rounded border border-blue-200">
+                                    <div class="text-sm font-bold text-blue-900 mb-2">📐 Preview de Capacidad:</div>
+                                    <div class="text-sm text-blue-800">
+                                        <div>Total espacios: <strong>${state.newMachine.total_filas} bandejas × ${state.newMachine.total_columnas} posiciones = ${state.newMachine.total_filas * state.newMachine.total_columnas} espacios</strong></div>
+                                        <div>Capacidad por espacio: <strong>${state.newMachine.productos_por_slot} producto${state.newMachine.productos_por_slot !== 1 ? 's' : ''}</strong></div>
+                                        <div>Capacidad total: <strong>${state.newMachine.total_filas * state.newMachine.total_columnas * state.newMachine.productos_por_slot} unidades</strong></div>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-3">🎯 Configurar Capacidad por Espacio</label>
+                                    <p class="text-xs text-gray-600 mb-3">Cada celda puede tener diferente capacidad. Ingresa cuántos productos caben en cada espacio:</p>
+                                    <div class="border rounded p-4 bg-gray-50 grid gap-2" style="grid-template-columns: repeat(${state.newMachine.total_columnas}, 1fr);">
+                                        ${Array.from({ length: state.newMachine.total_filas * state.newMachine.total_columnas }).map((_, i) => {
+                                            const fila = Math.floor(i / state.newMachine.total_columnas) + 1;
+                                            const columna = (i % state.newMachine.total_columnas) + 1;
+                                            const espacio = codigoEspacio(fila, columna);
+                                            const capacidad = state.newMachine.capacidadPorEspacio[espacio] || 1;
+                                            
+                                            return `
+                                                <div class="flex flex-col items-center gap-1">
+                                                    <label class="text-xs text-gray-600 font-bold">B${fila}·P${columna}</label>
+                                                    <input type="number" min="1" max="20" value="${capacidad}" oninput="window.updateCapacidadEspacio('${espacio}', this.value)" class="w-full border border-gray-300 p-2 rounded text-center text-sm font-bold focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                                    <span class="text-xs text-gray-500">Esp.${espacio}</span>
+                                                </div>
+                                            `;
+                                        }).join('')}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="flex gap-3 mt-6">
+                                <button onclick="window.addMachine()" class="flex-1 bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold text-lg">
+                                    ✅ Crear Máquina
+                                </button>
+                                <button onclick="window.toggleAddMachineForm()" class="flex-1 bg-gray-600 text-white py-3 rounded hover:bg-gray-700 font-bold text-lg">
+                                    ❌ Cancelar
+                                </button>
+                            </div>
+                        </div>
+                    ` : ''}
+
+                    ${!state.editingMachine ? `
+                        ${state.maquinas.length === 0 ? `
+                            <div class="bg-yellow-50 p-6 rounded-lg border border-yellow-300 text-center">
+                                <div class="text-4xl mb-3">📭</div>
+                                <h3 class="text-lg font-bold mb-2">No hay máquinas configuradas</h3>
+                                <p class="text-gray-700">Haz clic en "Nueva Máquina" para empezar</p>
+                            </div>
+                        ` : `
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                ${state.maquinas.map(maquina => {
+                                    const asignacionesMaquina = state.asignaciones.filter(a => String(a.maquina_id) === String(maquina.id));
+                                    const totalSlots = (maquina.total_filas || 6) * (maquina.total_columnas || 10);
+                                    const ocupados = asignacionesMaquina.length;
+                                    const porcentajeOcupacion = totalSlots > 0 ? ((ocupados / totalSlots) * 100).toFixed(0) : 0;
+
+                                    return `
+                                        <div class="bg-white p-6 rounded-lg shadow hover:shadow-lg transition-all">
+                                            <div class="flex justify-between items-start mb-4">
+                                                <div>
+                                                    <h3 class="text-xl font-bold">${esc(maquina.nombre)}</h3>
+                                                    <p class="text-sm text-gray-600">${esc(maquina.ubicacion)}</p>
+                                                </div>
+                                                <button onclick="window.editMachine('${maquina.id}')" class="bg-blue-600 text-white px-3 py-2 rounded text-sm hover:bg-blue-700">
+                                                    ⚙️ Editar
+                                                </button>
+                                            </div>
+                                            
+                                            <div class="space-y-3">
+                                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                                    <span class="text-sm font-medium">Bandejas × Posiciones</span>
+                                                    <span class="font-bold">${maquina.total_filas || 6} × ${maquina.total_columnas || 10}</span>
+                                                </div>
+                                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                                    <span class="text-sm font-medium">Total Espacios</span>
+                                                    <span class="font-bold">${totalSlots}</span>
+                                                </div>
+                                                <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
+                                                    <span class="text-sm font-medium">Ocupación</span>
+                                                    <span class="font-bold text-blue-600">${porcentajeOcupacion}% (${ocupados}/${totalSlots})</span>
+                                                </div>
+                                                <div class="w-full bg-gray-200 rounded-full h-2">
+                                                    <div class="bg-blue-600 h-2 rounded-full transition-all" style="width: ${porcentajeOcupacion}%"></div>
+                                                </div>
+                                                <button onclick="window.deleteMachine('${maquina.id}')" class="w-full mt-3 bg-red-600 text-white py-2 rounded hover:bg-red-700 text-sm">
+                                                    🗑️ Eliminar
+                                                </button>
+                                            </div>
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        `}
+                    ` : `
+                        <div class="bg-white p-6 rounded-lg shadow">
+                            <h3 class="text-xl font-bold mb-6">Configurar Máquina</h3>
+                            <div class="space-y-6">
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">Bandejas</label>
+                                    <div class="flex items-center gap-3">
+                                        <button onclick="window.decreaseRows()" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 text-lg font-bold">−</button>
+                                        <input type="number" value="${state.machineConfig.filas}" class="border p-2 rounded w-20 text-center text-lg font-bold" readonly>
+                                        <button onclick="window.increaseRows()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 text-lg font-bold">+</button>
+                                        <span class="text-gray-600 text-sm ml-4">Actualmente: <strong>${state.machineConfig.filas} bandejas</strong></span>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">Posiciones por bandeja</label>
+                                    <div class="flex items-center gap-3">
+                                        <button onclick="window.decreaseCols()" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 text-lg font-bold">−</button>
+                                        <input type="number" value="${state.machineConfig.columnas}" class="border p-2 rounded w-20 text-center text-lg font-bold" readonly>
+                                        <button onclick="window.increaseCols()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 text-lg font-bold">+</button>
+                                        <span class="text-gray-600 text-sm ml-4">Actualmente: <strong>${state.machineConfig.columnas} posiciones</strong></span>
+                                    </div>
+                                </div>
+
+
+
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">Productos por Espacio</label>
+                                    <div class="flex items-center gap-3">
+                                        <button onclick="window.decreaseProductos()" class="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 text-lg font-bold">−</button>
+                                        <input type="number" value="${state.machineConfig.productoPorSlot}" class="border p-2 rounded w-20 text-center text-lg font-bold" readonly>
+                                        <button onclick="window.increaseProductos()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 text-lg font-bold">+</button>
+                                        <span class="text-gray-600 text-sm ml-4">Actualmente: <strong>${state.machineConfig.productoPorSlot} producto${state.machineConfig.productoPorSlot !== 1 ? 's' : ''}</strong></span>
+                                    </div>
+                                </div>
+
+                                <div class="bg-blue-50 p-4 rounded border border-blue-200">
+                                    <div class="text-sm font-bold mb-2">📊 Resumen:</div>
+                                    <div class="text-sm space-y-1">
+                                        <div>Total de espacios: <strong>${state.machineConfig.filas} bandejas × ${state.machineConfig.columnas} posiciones = ${state.machineConfig.filas * state.machineConfig.columnas}</strong></div>
+                                        <div>Capacidad por slot: <strong>${state.machineConfig.productoPorSlot} producto${state.machineConfig.productoPorSlot !== 1 ? 's' : ''}</strong></div>
+                                        <div>Capacidad total: <strong>${state.machineConfig.filas * state.machineConfig.columnas * state.machineConfig.productoPorSlot} unidades</strong></div>
+                                    </div>
+                                </div>
+
+                                <div class="flex gap-3">
+                                    <button onclick="window.saveMachineConfig()" class="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 font-bold">
+                                        ✅ Guardar Cambios
+                                    </button>
+                                    <button onclick="window.cancelEditMachine()" class="flex-1 bg-gray-600 text-white py-3 rounded-lg hover:bg-gray-700 font-bold">
+                                        ❌ Cancelar
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    `}
+                </div>
+            `;
+        }
+
+        function renderScannerModal() {
+            return `
+                <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                        <div class="bg-blue-600 text-white p-4 flex justify-between items-center sticky top-0">
+                            <h3 class="text-xl font-bold">📷 Escanear Código de Barras</h3>
+                            <button onclick="window.closeScannerModal()" class="text-2xl font-bold">✕</button>
+                        </div>
+                        
+                        <div class="p-6 space-y-4">
+                            ${!state.detectedBarcode ? `
+                                <div class="text-center">
+                                    <p class="text-gray-600 mb-4">Apunta tu cámara hacia un código de barras</p>
+                                    <div class="scanner-overlay mb-4">
+                                        <div id="scanner" style="width: 100%; aspect-ratio: 4/3; background: #000;"></div>
+                                    </div>
+                                    <p class="text-sm text-gray-500">Soporta: EAN-13, UPC-A, Code-128, Code-39</p>
+                                </div>
+                            ` : `
+                                <div class="space-y-4">
+                                    <div class="bg-green-50 p-4 rounded-lg border-2 border-green-600">
+                                        <div class="text-center">
+                                            <div class="text-4xl mb-2">✅</div>
+                                            <div class="text-sm text-gray-600 mb-1">Código detectado:</div>
+                                            <div class="text-2xl font-bold text-green-600">${esc(state.detectedBarcode)}</div>
+                                        </div>
+                                    </div>
+
+                                    ${state.scannedProductData && state.scannedProductData.id ? `
+                                        <div class="bg-blue-50 p-4 rounded-lg border-2 border-blue-600">
+                                            <div class="text-sm font-bold mb-2">📦 Producto Encontrado:</div>
+                                            <div class="space-y-1 text-sm">
+                                                <div><strong>Nombre:</strong> ${esc(state.scannedProductData.nombre_producto)}</div>
+                                                <div><strong>Familia:</strong> ${esc(state.scannedProductData.familia)}</div>
+                                                <div><strong>Precio Venta:</strong> $${clp(state.scannedProductData.precio_venta_unitario)}</div>
+                                                <div><strong>Cantidad Actual:</strong> ${Number(state.scannedProductData.cantidad_actual) || 0}</div>
+                                            </div>
+                                        </div>
+                                    ` : `
+                                        <div class="bg-yellow-50 p-4 rounded-lg border-2 border-yellow-600">
+                                            <div class="text-sm font-bold mb-2">⚠️ Producto No Encontrado</div>
+                                            <p class="text-sm text-gray-600">Deberás completar los datos manualmente</p>
+                                        </div>
+                                    `}
+
+                                    <div class="flex gap-3">
+                                        <button onclick="window.confirmScannedProduct()" class="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 font-bold">
+                                            ✅ Usar Este Código
+                                        </button>
+                                        <button onclick="window.openScannerModal()" class="flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-bold">
+                                            🔄 Escanear Otro
+                                        </button>
+                                    </div>
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderEditProductModal() {
+            if (!state.showEditProductModal || !state.editingProduct) return '';
+
+            return `
+                <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                        <div class="bg-blue-600 text-white p-4 flex justify-between items-center sticky top-0">
+                            <h3 class="text-xl font-bold">✏️ Editar Producto</h3>
+                            <button onclick="window.closeEditProductModal()" class="text-2xl font-bold">✕</button>
+                        </div>
+                        
+                        <div class="p-6 space-y-4">
+                            ${renderProductFields([...new Set(['Snacks', 'Bebidas', 'Proteína', 'Dulces', 'Confites', ...state.inventario.map(p => p.familia).filter(Boolean)])], true)}
+                            <div class="flex gap-3">
+                                <button onclick="window.saveProductChanges()" class="flex-1 bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold">
+                                    ✅ Guardar Cambios
+                                </button>
+                                <button onclick="window.closeEditProductModal()" class="flex-1 bg-gray-600 text-white py-3 rounded hover:bg-gray-700 font-bold">
+                                    ❌ Cancelar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderEditAssignmentModal() {
+            if (!state.showEditAssignmentModal) return '';
+
+            return `
+                <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div class="bg-white rounded-lg max-w-lg w-full max-h-[90vh] overflow-y-auto">
+                        <div class="bg-blue-600 text-white p-4 flex justify-between items-center sticky top-0">
+                            <h3 class="text-xl font-bold">🎯 Asignar producto · ${describeEspacio(state.newAssignment.espacio)}</h3>
+                            <button onclick="window.closeEditAssignmentModal()" class="text-2xl font-bold">✕</button>
+                        </div>
+                        
+                        <div class="p-6 space-y-5">
+                            <div>
+                                <label class="block text-sm font-bold text-gray-700 mb-2">📦 Seleccionar Producto</label>
+                                <select onchange="window.updateAssignmentField('sku', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <option value="">-- Selecciona un producto --</option>
+                                    ${state.inventario.map(p => `
+                                        <option value="${esc(p.sku)}" ${String(state.newAssignment.sku) === String(p.sku) ? 'selected' : ''}>
+                                            ${esc(p.nombre_producto)} (${esc(p.sku)}) - Disponible: ${Number(p.cantidad_actual) || 0} unid.
+                                        </option>
+                                    `).join('')}
+                                </select>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-bold text-gray-700 mb-2">📊 Cantidad a Asignar</label>
+                                <input type="number" min="1" value="${state.newAssignment.cantidad_asignada}" oninput="window.updateAssignmentField('cantidad_asignada', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold">
+                                <p class="text-xs text-gray-500 mt-1">Cuántos productos de este tipo irán en el espacio ${state.newAssignment.espacio}</p>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-bold text-gray-700 mb-2">🎯 Productos por Slot</label>
+                                <input type="number" min="1" value="${state.newAssignment.productos_por_slot}" oninput="window.updateAssignmentField('productos_por_slot', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg font-bold">
+                                <p class="text-xs text-gray-500 mt-1">Cuántos productos caben en cada posición dentro del espacio ${state.newAssignment.espacio}</p>
+                            </div>
+
+                            ${state.newAssignment.sku ? `
+                                <div class="bg-green-50 p-4 rounded border border-green-200">
+                                    <div class="text-sm font-bold text-green-900">✅ Resumen:</div>
+                                    <div class="text-sm text-green-800 mt-2">
+                                        <div>Producto: <strong>${esc(state.inventario.find(p => String(p.sku) === String(state.newAssignment.sku))?.nombre_producto)}</strong></div>
+                                        <div>Cantidad Total: <strong>${state.newAssignment.cantidad_asignada} unidades</strong></div>
+                                        <div>Productos por Slot: <strong>${state.newAssignment.productos_por_slot}</strong></div>
+                                        <div>Slots ocupados: <strong>${Math.ceil(state.newAssignment.cantidad_asignada / state.newAssignment.productos_por_slot)}</strong></div>
+                                        <div>Espacio: <strong>${state.newAssignment.espacio}</strong></div>
+                                    </div>
+                                </div>
+                            ` : ''}
+
+                            <div class="flex gap-3">
+                                <button onclick="window.saveAssignment()" class="flex-1 bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold">
+                                    ✅ Guardar Asignación
+                                </button>
+                                <button onclick="window.deleteAssignmentFromModal()" class="flex-1 bg-red-600 text-white py-3 rounded hover:bg-red-700 font-bold">
+                                    🗑️ Eliminar
+                                </button>
+                            </div>
+
+                            <button onclick="window.closeEditAssignmentModal()" class="w-full bg-gray-600 text-white py-2 rounded hover:bg-gray-700 font-bold">
+                                ❌ Cancelar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderLoginScreen() {
+            const bloqueado = state.loginBlockedUntil > Date.now();
+            return `
+                <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-600 to-blue-900 p-4">
+                    <form class="bg-white rounded-lg shadow-xl max-w-md w-full p-8" onsubmit="event.preventDefault(); window.handleLogin();" autocomplete="on">
+                        <div class="text-center mb-6">
+                            <div class="text-6xl mb-3">📦</div>
+                            <h1 class="text-2xl font-bold">GO BOX Dashboard</h1>
+                            <p class="text-gray-600 text-sm">Acceso restringido</p>
+                        </div>
+
+                        <div class="space-y-4">
+                            <label class="block text-sm font-bold text-gray-700">Correo
+                                <input type="email" id="loginEmail" name="email" autocomplete="username" required
+                                    value="${esc(state.loginForm.email)}" oninput="window.updateLoginField('email', this.value)"
+                                    class="mt-1 w-full border p-3 rounded font-normal focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            </label>
+                            <label class="block text-sm font-bold text-gray-700">Contraseña
+                                <input type="password" id="loginPassword" name="password" autocomplete="current-password" required
+                                    value="" oninput="window.updateLoginField('password', this.value)"
+                                    class="mt-1 w-full border p-3 rounded font-normal focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            </label>
+                            ${state.loginError ? `<div class="bg-red-50 border border-red-300 text-red-800 text-sm p-3 rounded" role="alert">${esc(state.loginError)}</div>` : ''}
+                            <button type="submit" ${state.loginLoading || bloqueado ? 'disabled' : ''} class="w-full bg-blue-600 text-white py-3 rounded hover:bg-blue-700 font-bold disabled:opacity-60 disabled:cursor-not-allowed">
+                                ${state.loginLoading ? 'Verificando…' : 'Ingresar'}
+                            </button>
+                        </div>
+
+                        <p class="text-xs text-gray-500 text-center mt-4">Las cuentas se crean desde Supabase. Si olvidaste tu contraseña, pide que te la restablezcan.</p>
+                    </form>
+                </div>
+            `;
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+
+            if (state.loading) {
+                app.innerHTML = `
+                    <div class="flex items-center justify-center min-h-screen bg-gradient-to-br from-blue-600 to-blue-800">
+                        <div class="text-white text-center">
+                            <div class="text-6xl mb-4 animate-bounce">📦</div>
+                            <div class="text-2xl font-bold">GO BOX Dashboard</div>
+                            <div class="text-sm mt-2 opacity-80">Cargando datos...</div>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            // Sin sesión: solo se muestra el login (el dashboard ni siquiera se dibuja detrás)
+            if (!state.session && !state.demoMode) {
+                app.innerHTML = renderLoginScreen();
+                const campo = document.getElementById(state.loginForm.email ? 'loginPassword' : 'loginEmail');
+                if (campo) campo.focus();
+                return;
+            }
+
+            const contentMap = {
+                dashboard: renderDashboard,
+                inventario: renderInventario,
+                asignaciones: renderAsignaciones,
+                historial: renderHistorial,
+                maquinas: renderMaquinas,
+                analytics: renderAnalytics,
+            };
+
+            // Un error en una pestaña ya no deja la pantalla en blanco
+            let content;
+            try {
+                content = (contentMap[state.activeTab] || renderDashboard)();
+            } catch (err) {
+                console.error('Error renderizando pestaña:', err);
+                content = `<div class="bg-red-50 border border-red-300 text-red-800 p-6 rounded-lg">❌ Error al mostrar esta sección: ${esc(err.message)}</div>`;
+            }
+
+            // Guardar foco y cursor antes de redibujar (antes al escribir en la búsqueda o formularios se perdía el foco)
+            const active = document.activeElement;
+            let focusInfo = null;
+            if (active && app.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+                const fields = Array.from(app.querySelectorAll('input, select, textarea'));
+                focusInfo = { index: fields.indexOf(active), id: active.id };
+                try { focusInfo.start = active.selectionStart; focusInfo.end = active.selectionEnd; } catch (e) {}
+            }
+
+            app.innerHTML = `
+                <div class="min-h-screen bg-gray-50">
+                    <header class="bg-gradient-to-r from-blue-600 to-blue-800 text-white shadow-lg sticky top-0 z-40">
+                        <div class="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center flex-wrap gap-4">
+                            <div class="flex items-center gap-3">
+                                <div class="text-4xl">📦</div>
+                                <div>
+                                    <div class="logo">
+                                        <span class="logo-go">GO</span><span class="logo-box">BOX</span>
+                                    </div>
+                                    <div class="text-xs opacity-80">Tu Tienda 24/7</div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <div class="text-sm">👤 ${esc(state.currentUser)}</div>
+                                <button onclick="window.handleLogout()" class="bg-red-600 text-white px-4 py-2 rounded font-bold hover:bg-red-700">
+                                    🚪 Salir
+                                </button>
+                                <button onclick="window.fetchAllData()" class="bg-white text-blue-600 px-4 py-2 rounded font-bold hover:bg-gray-100">
+                                    🔄 Actualizar
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    ${state.demoMode ? `
+                        <div class="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm text-center py-2 px-4">
+                            ⚠️ Modo demo: datos de ejemplo, los cambios no se guardan.
+                        </div>
+                    ` : ''}
+                    ${state.loadError ? `
+                        <div class="bg-red-100 border-b border-red-300 text-red-900 text-sm text-center py-2 px-4" role="alert">
+                            ❌ ${esc(state.loadError)}
+                        </div>
+                    ` : ''}
+
+                    <div class="max-w-7xl mx-auto px-4 py-6">
+                        <div class="flex gap-2 mb-6 overflow-x-auto border-b">
+                            <button onclick="window.setTab('dashboard')" class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''} flex items-center gap-2 px-4 py-3 border-b-2 font-bold whitespace-nowrap text-gray-700">
+                                📊 Dashboard
+                            </button>
+                            <button onclick="window.setTab('analytics')" class="tab-btn ${state.activeTab === 'analytics' ? 'active' : ''} flex items-center gap-2 px-4 py-3 border-b-2 font-bold whitespace-nowrap text-gray-700">
+                                📈 Analítica
+                            </button>
+                            <button onclick="window.setTab('inventario')" class="tab-btn ${state.activeTab === 'inventario' ? 'active' : ''} flex items-center gap-2 px-4 py-3 border-b-2 font-bold whitespace-nowrap text-gray-700">
+                                📦 Inventario
+                            </button>
+                            <button onclick="window.setTab('asignaciones')" class="tab-btn ${state.activeTab === 'asignaciones' ? 'active' : ''} flex items-center gap-2 px-4 py-3 border-b-2 font-bold whitespace-nowrap text-gray-700">
+                                🎯 Asignaciones
+                            </button>
+                            <button onclick="window.setTab('historial')" class="tab-btn ${state.activeTab === 'historial' ? 'active' : ''} flex items-center gap-2 px-4 py-3 border-b-2 font-bold whitespace-nowrap text-gray-700">
+                                📋 Historial
+                            </button>
+                            <button onclick="window.setTab('maquinas')" class="tab-btn ${state.activeTab === 'maquinas' ? 'active' : ''} flex items-center gap-2 px-4 py-3 border-b-2 font-bold whitespace-nowrap text-gray-700">
+                                ⚙️ Máquinas
+                            </button>
+                        </div>
+
+                        ${content}
+                    </div>
+
+                    <footer class="bg-gray-900 text-white text-center py-6 mt-12">
+                        <div>GO BOX Dashboard v5.0 | Concepción, Chile 🇨🇱</div>
+                    </footer>
+                </div>
+
+                ${state.showScannerModal ? renderScannerModal() : ''}
+                ${state.showEditProductModal ? renderEditProductModal() : ''}
+                ${state.showEditAssignmentModal ? renderEditAssignmentModal() : ''}
+                ${state.showImportModal ? renderImportModal() : ''}
+            `;
+
+            // Restaurar foco y cursor
+            if (focusInfo) {
+                const fields = Array.from(app.querySelectorAll('input, select, textarea'));
+                const target = (focusInfo.id && document.getElementById(focusInfo.id)) || fields[focusInfo.index];
+                if (target) {
+                    target.focus();
+                    try { if (focusInfo.start !== null && focusInfo.start !== undefined) target.setSelectionRange(focusInfo.start, focusInfo.end); } catch (e) {}
+                }
+            }
+
+            // Inicializar gráficos cuando estamos en dashboard (con instancias previas destruidas en initCharts)
+            if (state.activeTab === 'dashboard') {
+                setTimeout(() => window.initCharts(), 50);
+            }
+        }
+
+        window.addEventListener('load', iniciarApp);
+    </script>
+</body>
+</html>
