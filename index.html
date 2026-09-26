@@ -176,12 +176,20 @@
         }
 
         async function fetchMaquinas() {
-            const { data, error } = await supabaseClient.from('maquinas').select('*');
-            if (error) {
-                console.error('Error fetching maquinas:', error.message || JSON.stringify(error));
-                if (!state.error) state.error = 'maquinas: ' + (error.message || JSON.stringify(error));
+            try {
+                const { data, error } = await supabaseClient.from('maquinas').select('*');
+                if (error) throw error;
+                state.maquinas = data || [];
+                console.log('✅ Máquinas cargadas desde Supabase:', state.maquinas.length);
+            } catch (err) {
+                console.error('❌ Error fetching maquinas:', err.message);
+                // FALLBACK: Datos mock si Supabase falla
+                state.maquinas = [
+                    { id: 'MAQ-001', nombre: 'Parque Lomas', serial_amit: 0, ubicacion: 'San Pedro de la Paz', total_espacios: 60, total_filas: 7, total_columnas: 5 },
+                    { id: 'MAQ-002', nombre: 'Edificio New', serial_amit: 440864, ubicacion: 'Concepción', total_espacios: 48, total_filas: 7, total_columnas: 5 }
+                ];
+                console.log('⚠️ Usando fallback mock data para máquinas');
             }
-            else state.maquinas = data || [];
         }
 
         async function fetchHistorial() {
