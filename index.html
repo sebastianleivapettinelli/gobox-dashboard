@@ -176,20 +176,12 @@
         }
 
         async function fetchMaquinas() {
-            try {
-                const { data, error } = await supabaseClient.from('maquinas').select('*');
-                if (error) throw error;
-                state.maquinas = data || [];
-                console.log('✅ Máquinas cargadas desde Supabase:', state.maquinas.length);
-            } catch (err) {
-                console.error('❌ Error fetching maquinas:', err.message);
-                // FALLBACK: Datos mock si Supabase falla
-                state.maquinas = [
-                    { id: 'MAQ-001', nombre: 'Parque Lomas', serial_amit: 0, ubicacion: 'San Pedro de la Paz', total_espacios: 60, total_filas: 7, total_columnas: 5 },
-                    { id: 'MAQ-002', nombre: 'Edificio New', serial_amit: 440864, ubicacion: 'Concepción', total_espacios: 48, total_filas: 7, total_columnas: 5 }
-                ];
-                console.log('⚠️ Usando fallback mock data para máquinas');
+            const { data, error } = await supabaseClient.from('maquinas').select('*');
+            if (error) {
+                console.error('Error fetching maquinas:', error.message || JSON.stringify(error));
+                if (!state.error) state.error = 'maquinas: ' + (error.message || JSON.stringify(error));
             }
+            else state.maquinas = data || [];
         }
 
         async function fetchHistorial() {
@@ -208,20 +200,13 @@
             localStorage.setItem('gobox_historial', JSON.stringify(state.historial.slice(0, 100)));
         }
 
-        // ============================================
-        // FETCH FASE 3
-        // ============================================
         async function fetchInventarioInicial() {
             try {
-                const { data, error } = await supabaseClient.from('inventario_inicial').select('*').order('created_at', { ascending: false });
-                if (error) {
-                    console.warn('⚠️ No se pudo conectar con inventario_inicial:', error.message);
-                    state.inventario_inicial = [];
-                } else {
-                    state.inventario_inicial = data || [];
-                }
+                const { data, error } = await supabaseClient.from('inventario_inicial').select('*').order('maquina_id,casillero', { ascending: true });
+                if (error) throw error;
+                state.inventario_inicial = data || [];
             } catch (err) {
-                console.warn('⚠️ Error fetchInventarioInicial:', err.message);
+                console.warn('⚠️ Error cargando inventario inicial:', err.message);
                 state.inventario_inicial = [];
             }
         }
@@ -229,61 +214,11 @@
         async function fetchGastos() {
             try {
                 const { data, error } = await supabaseClient.from('gastos').select('*').order('fecha', { ascending: false });
-                if (error) {
-                    console.warn('⚠️ No se pudo conectar con gastos:', error.message);
-                    state.gastos = [];
-                } else {
-                    state.gastos = data || [];
-                }
+                if (error) throw error;
+                state.gastos = data || [];
             } catch (err) {
-                console.warn('⚠️ Error fetchGastos:', err.message);
+                console.warn('⚠️ Error cargando gastos:', err.message);
                 state.gastos = [];
-            }
-        }
-
-        window.saveGasto = async function() {
-            const fecha = document.getElementById('gasto_fecha')?.value;
-            const categoria = document.getElementById('gasto_categoria')?.value;
-            const descripcion = document.getElementById('gasto_descripcion')?.value;
-            const monto_neto = parseFloat(document.getElementById('gasto_monto_neto')?.value || 0);
-            
-            if (!fecha || !categoria || !monto_neto) {
-                alert('⚠️ Completa fecha, categoría y monto');
-                return;
-            }
-
-            const iva = monto_neto * 0.19;
-            const monto_total = monto_neto + iva;
-
-            try {
-                const { error } = await supabaseClient.from('gastos').insert([{
-                    fecha: fecha,
-                    categoria: categoria,
-                    descripcion: descripcion,
-                    monto_neto: monto_neto,
-                    iva: iva,
-                    monto_total: monto_total,
-                    maquina_id: null,
-                    facturas_urls: []
-                }]);
-
-                if (error) {
-                    console.error('Error:', error);
-                    alert('❌ Error al guardar gasto: ' + error.message);
-                } else {
-                    alert('✅ Gasto guardado correctamente');
-                    guardarHistorial('CREAR_GASTO', `${categoria}: $${monto_total.toLocaleString('es-CL')}`);
-                    // Limpiar formulario
-                    document.getElementById('gasto_fecha').value = new Date().toISOString().split('T')[0];
-                    document.getElementById('gasto_categoria').value = 'Arriendo';
-                    document.getElementById('gasto_descripcion').value = '';
-                    document.getElementById('gasto_monto_neto').value = '';
-                    await fetchGastos();
-                    render();
-                }
-            } catch (err) {
-                console.error('Error inesperado:', err);
-                alert('💥 Error: ' + err.message);
             }
         }
 
@@ -946,11 +881,6 @@
                 }
             }
             return { nombre: maxMaquina, monto: maxMonto };
-        }
-
-        function getStockCritico() {
-            // Retorna productos con cantidad_actual <= cantidad_minima (5 por defecto)
-            return state.inventario.filter(p => (p.cantidad_actual || 0) <= (p.cantidad_minima || 5));
         }
 
         // ============================================
@@ -1813,200 +1743,102 @@
             `;
         }
 
-        // ============================================
-        // FASE 3: INVENTARIO INICIAL
-        // ============================================
         function renderInventarioInicial() {
-            const getMaquinaNombre = (maquinaId) => {
-                const maquina = state.maquinas.find(m => m.id === maquinaId);
-                return maquina ? maquina.nombre : maquinaId;
-            };
+            if (!state.inventario_inicial || state.inventario_inicial.length === 0) {
+                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">📦 No hay datos de inventario inicial</p></div>`;
+            }
 
-            return `
-                <div class="bg-white p-6 rounded-lg shadow-md">
-                    <h2 class="text-2xl font-bold mb-4">📦 Inventario Inicial por Máquina</h2>
-                    <p class="text-gray-600 mb-4">${state.inventario_inicial.length} registros de inventario inicial</p>
-                    
-                    <div class="mb-4 flex gap-2">
-                        <button onclick="alert('Cargar inventario desde Excel')" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 font-bold">
-                            📤 Importar Excel
-                        </button>
-                        <button onclick="alert('Exportar datos')" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 font-bold">
-                            📥 Exportar CSV
-                        </button>
-                    </div>
+            const porMaquina = {};
+            state.inventario_inicial.forEach(inv => {
+                if (!porMaquina[inv.maquina_id]) porMaquina[inv.maquina_id] = [];
+                porMaquina[inv.maquina_id].push(inv);
+            });
 
-                    ${state.inventario_inicial.length > 0 ? `
-                        <table class="w-full border">
-                            <thead class="bg-gray-100">
-                                <tr>
-                                    <th class="p-3 text-left border">Máquina</th>
-                                    <th class="p-3 text-left border">Casillero</th>
-                                    <th class="p-3 text-left border">Producto</th>
-                                    <th class="p-3 text-right border">Cantidad Inicial</th>
-                                    <th class="p-3 text-right border">Cantidad Actual</th>
-                                    <th class="p-3 text-right border">Variación</th>
+            return Object.entries(porMaquina).map(([maqId, items]) => `
+                <div class="mb-8 bg-white rounded-lg shadow p-6">
+                    <h3 class="text-xl font-bold mb-4">📦 ${maqId}</h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="bg-gray-100 border-b">
+                                    <th class="text-left p-2">Casillero</th>
+                                    <th class="text-left p-2">Producto</th>
+                                    <th class="text-left p-2">Familia</th>
+                                    <th class="text-center p-2">Cantidad Inicial</th>
+                                    <th class="text-center p-2">Cantidad Actual</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                ${state.inventario_inicial.map(inv => {
-                                    const variacion = inv.cantidad_actual - inv.cantidad_inicial;
-                                    const colorVariacion = variacion < 0 ? 'text-red-600' : variacion > 0 ? 'text-green-600' : 'text-gray-600';
-                                    return `
-                                        <tr>
-                                            <td class="p-3 border">${getMaquinaNombre(inv.maquina_id)}</td>
-                                            <td class="p-3 border">${inv.casillero}</td>
-                                            <td class="p-3 border">${inv.producto}</td>
-                                            <td class="p-3 border text-right font-bold">${inv.cantidad_inicial}</td>
-                                            <td class="p-3 border text-right font-bold">${inv.cantidad_actual}</td>
-                                            <td class="p-3 border text-right font-bold ${colorVariacion}">${variacion > 0 ? '+' : ''}${variacion}</td>
-                                        </tr>
-                                    `;
-                                }).join('')}
+                                ${items.map(inv => `
+                                    <tr class="border-b hover:bg-gray-50">
+                                        <td class="p-2 font-bold">${inv.casillero}</td>
+                                        <td class="p-2">${inv.producto}</td>
+                                        <td class="p-2 text-xs text-gray-600">${inv.familia}</td>
+                                        <td class="p-2 text-center">${inv.cantidad_inicial}</td>
+                                        <td class="p-2 text-center font-bold">${inv.cantidad_actual}</td>
+                                    </tr>
+                                `).join('')}
                             </tbody>
                         </table>
-                    ` : `
-                        <p class="text-gray-500 text-center py-8">Sin inventario inicial registrado aún</p>
-                    `}
-
-                    <div class="mt-6 p-4 bg-blue-50 rounded border border-blue-200">
-                        <h3 class="font-bold mb-2">💡 Próximas funcionalidades:</h3>
-                        <ul class="text-sm space-y-1 text-gray-700">
-                            <li>✓ Sincronización automática de inventario</li>
-                            <li>✓ Alertas de stock bajo</li>
-                            <li>✓ Auditoría de cambios</li>
-                            <li>✓ Reportes de rotación de productos</li>
-                        </ul>
                     </div>
                 </div>
-            `;
+            `).join('');
         }
 
-        // ============================================
-        // FASE 3: GASTOS
-        // ============================================
         function renderGastos() {
-            const getCategoriaBadge = (categoria) => {
-                const colores = {
-                    'Arriendo': 'bg-orange-100 text-orange-800',
-                    'Compra productos': 'bg-green-100 text-green-800',
-                    'Mantenimiento': 'bg-blue-100 text-blue-800',
-                    'Otros': 'bg-gray-100 text-gray-800'
-                };
-                return colores[categoria] || 'bg-gray-100 text-gray-800';
-            };
+            if (!state.gastos || state.gastos.length === 0) {
+                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">💰 No hay gastos registrados</p></div>`;
+            }
 
-            const totalGastos = state.gastos.reduce((sum, g) => sum + (g.monto_total || 0), 0);
             const gastosPorCategoria = {};
-            state.gastos.forEach(g => {
-                if (!gastosPorCategoria[g.categoria]) gastosPorCategoria[g.categoria] = 0;
-                gastosPorCategoria[g.categoria] += g.monto_total || 0;
+            state.gastos.forEach(gasto => {
+                if (!gastosPorCategoria[gasto.categoria]) {
+                    gastosPorCategoria[gasto.categoria] = { total: 0, items: [] };
+                }
+                gastosPorCategoria[gasto.categoria].total += gasto.monto_total || 0;
+                gastosPorCategoria[gasto.categoria].items.push(gasto);
             });
 
             return `
-                <div class="space-y-6">
-                    <div class="bg-white p-6 rounded-lg shadow-md">
-                        <h2 class="text-2xl font-bold mb-4">💰 Registrar Nuevo Gasto</h2>
-                        
-                        <div class="grid grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-sm font-bold mb-2">Fecha</label>
-                                <input id="gasto_fecha" type="date" class="w-full border p-2 rounded" value="${new Date().toISOString().split('T')[0]}">
+                <div class="bg-white rounded-lg shadow p-6 mb-6">
+                    <h3 class="text-xl font-bold mb-4">💰 Resumen de Gastos</h3>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        ${Object.entries(gastosPorCategoria).map(([cat, data]) => `
+                            <div class="bg-blue-50 rounded p-4 border border-blue-200">
+                                <p class="text-sm text-gray-600">${cat}</p>
+                                <p class="text-2xl font-bold text-blue-600">$${data.total.toLocaleString('es-CL')}</p>
                             </div>
-                            <div>
-                                <label class="block text-sm font-bold mb-2">Categoría</label>
-                                <select id="gasto_categoria" class="w-full border p-2 rounded">
-                                    <option value="Arriendo">Arriendo</option>
-                                    <option value="Compra productos">Compra de productos</option>
-                                    <option value="Mantenimiento">Mantenimiento</option>
-                                    <option value="Otros">Otros</option>
-                                </select>
-                            </div>
-                            <div class="col-span-2">
-                                <label class="block text-sm font-bold mb-2">Descripción</label>
-                                <textarea id="gasto_descripcion" class="w-full border p-2 rounded" rows="3" placeholder="Detalles del gasto..."></textarea>
-                            </div>
-                            <div>
-                                <label class="block text-sm font-bold mb-2">Monto Neto</label>
-                                <input id="gasto_monto_neto" type="number" class="w-full border p-2 rounded" placeholder="0.00" step="0.01">
-                            </div>
-                            <div>
-                                <label class="block text-sm font-bold mb-2">IVA Automático (19%)</label>
-                                <input type="text" class="w-full border p-2 rounded bg-gray-100" placeholder="Se calcula automáticamente" readonly>
-                            </div>
-                            <button type="button" onclick="window.saveGasto()" class="col-span-2 bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 font-bold">
-                                💾 Guardar Gasto
-                            </button>
-                        </div>
+                        `).join('')}
                     </div>
-
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="bg-white p-6 rounded-lg shadow-md">
-                            <h2 class="text-2xl font-bold mb-4">📊 Total de Gastos</h2>
-                            <div class="text-5xl font-bold text-green-600 mb-4">$${totalGastos.toLocaleString('es-CL')}</div>
-                            <div class="space-y-2">
-                                ${Object.entries(gastosPorCategoria).map(([cat, monto]) => `
-                                    <div class="flex justify-between p-2 bg-gray-50 rounded">
-                                        <span class="text-sm font-bold">${cat}</span>
-                                        <span class="text-sm font-bold">$${monto.toLocaleString('es-CL')}</span>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </div>
-
-                        <div class="bg-white p-6 rounded-lg shadow-md">
-                            <h2 class="text-2xl font-bold mb-4">📋 Últimos Gastos</h2>
-                            ${state.gastos.slice(0, 5).length > 0 ? `
-                                <div class="space-y-2">
-                                    ${state.gastos.slice(0, 5).map(g => `
-                                        <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
-                                            <div>
-                                                <span class="text-xs px-2 py-1 rounded font-bold ${getCategoriaBadge(g.categoria)}">${g.categoria}</span>
-                                                <p class="text-sm mt-1">${g.descripcion || 'Sin descripción'}</p>
-                                            </div>
-                                            <div class="text-right">
-                                                <p class="font-bold">$${g.monto_total.toLocaleString('es-CL')}</p>
-                                                <p class="text-xs text-gray-600">${new Date(g.fecha).toLocaleDateString('es-CL')}</p>
-                                            </div>
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            ` : `
-                                <p class="text-gray-500 text-center py-4">Sin gastos registrados aún</p>
-                            `}
-                        </div>
-                    </div>
-
-                    ${state.gastos.length > 0 ? `
-                        <div class="bg-white p-6 rounded-lg shadow-md">
-                            <h2 class="text-2xl font-bold mb-4">📋 Histórico Completo de Gastos</h2>
-                            
-                            <table class="w-full border text-sm">
-                                <thead class="bg-gray-100">
-                                    <tr>
-                                        <th class="p-3 text-left border">Fecha</th>
-                                        <th class="p-3 text-left border">Categoría</th>
-                                        <th class="p-3 text-left border">Descripción</th>
-                                        <th class="p-3 text-right border">Monto Neto</th>
-                                        <th class="p-3 text-right border">IVA</th>
-                                        <th class="p-3 text-right border">Total</th>
+                </div>
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h3 class="text-lg font-bold mb-4">Historial de Gastos</h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="bg-gray-100 border-b">
+                                    <th class="text-left p-2">Fecha</th>
+                                    <th class="text-left p-2">Categoría</th>
+                                    <th class="text-left p-2">Descripción</th>
+                                    <th class="text-center p-2">Monto Neto</th>
+                                    <th class="text-center p-2">IVA</th>
+                                    <th class="text-center p-2">Total</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${state.gastos.map(gasto => `
+                                    <tr class="border-b hover:bg-gray-50">
+                                        <td class="p-2">${gasto.fecha}</td>
+                                        <td class="p-2 font-bold">${gasto.categoria}</td>
+                                        <td class="p-2 text-xs text-gray-600">${gasto.descripcion || '-'}</td>
+                                        <td class="p-2 text-center">$${gasto.monto_neto?.toLocaleString('es-CL') || 0}</td>
+                                        <td class="p-2 text-center">$${gasto.iva?.toLocaleString('es-CL') || 0}</td>
+                                        <td class="p-2 text-center font-bold">$${gasto.monto_total?.toLocaleString('es-CL') || 0}</td>
                                     </tr>
-                                </thead>
-                                <tbody>
-                                    ${state.gastos.map(g => `
-                                        <tr>
-                                            <td class="p-3 border">${new Date(g.fecha).toLocaleDateString('es-CL')}</td>
-                                            <td class="p-3 border"><span class="text-xs px-2 py-1 rounded font-bold ${getCategoriaBadge(g.categoria)}">${g.categoria}</span></td>
-                                            <td class="p-3 border text-xs">${g.descripcion || '-'}</td>
-                                            <td class="p-3 border text-right">$${g.monto_neto.toLocaleString('es-CL')}</td>
-                                            <td class="p-3 border text-right">$${(g.iva || 0).toLocaleString('es-CL')}</td>
-                                            <td class="p-3 border text-right font-bold">$${g.monto_total.toLocaleString('es-CL')}</td>
-                                        </tr>
-                                    `).join('')}
-                                </tbody>
-                            </table>
-                        </div>
-                    ` : ``}
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             `;
         }
@@ -2100,7 +1932,7 @@
                     </div>
 
                     <footer class="bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v6.0 (FASE 3 Integrado) | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v5.0 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
