@@ -158,30 +158,37 @@
         }
 
         async function fetchInventario() {
-            const { data, error } = await supabaseClient.from('inventario_bodega').select('*').order('fecha_caducidad', { ascending: true });
-            if (error) {
-                console.error('Error fetching inventario:', error.message || JSON.stringify(error));
-                if (!state.error) state.error = 'inventario_bodega: ' + (error.message || JSON.stringify(error));
+            try {
+                const { data, error } = await supabaseClient.from('inventario_bodega').select('*').order('fecha_caducidad', { ascending: true });
+                if (error) throw error;
+                state.inventario = data || [];
+            } catch (err) {
+                state.inventario = [];
             }
-            else state.inventario = data || [];
         }
 
         async function fetchAsignaciones() {
-            const { data, error } = await supabaseClient.from('asignaciones_maquina').select('*');
-            if (error) {
-                console.error('Error fetching asignaciones:', error.message || JSON.stringify(error));
-                if (!state.error) state.error = 'asignaciones_maquina: ' + (error.message || JSON.stringify(error));
+            try {
+                const { data, error } = await supabaseClient.from('asignaciones_maquina').select('*');
+                if (error) throw error;
+                state.asignaciones = data || [];
+            } catch (err) {
+                state.asignaciones = [];
             }
-            else state.asignaciones = data || [];
         }
 
         async function fetchMaquinas() {
-            const { data, error } = await supabaseClient.from('maquinas').select('*');
-            if (error) {
-                console.error('Error fetching maquinas:', error.message || JSON.stringify(error));
-                if (!state.error) state.error = 'maquinas: ' + (error.message || JSON.stringify(error));
+            try {
+                const { data, error } = await supabaseClient.from('maquinas').select('*');
+                if (error) throw error;
+                state.maquinas = data || [];
+            } catch (err) {
+                console.warn('⚠️ Usando fallback para maquinas');
+                state.maquinas = [
+                    { id: 'MAQ-001', nombre: 'Parque Lomas', serial_amit: 0, ubicacion: 'San Pedro de la Paz', total_espacios: 60, total_filas: 7, total_columnas: 5 },
+                    { id: 'MAQ-002', nombre: 'Edificio New', serial_amit: 440864, ubicacion: 'Concepción', total_espacios: 48, total_filas: 7, total_columnas: 5 }
+                ];
             }
-            else state.maquinas = data || [];
         }
 
         async function fetchHistorial() {
@@ -206,7 +213,6 @@
                 if (error) throw error;
                 state.inventario_inicial = data || [];
             } catch (err) {
-                console.warn('⚠️ Error cargando inventario inicial:', err.message);
                 state.inventario_inicial = [];
             }
         }
@@ -217,7 +223,6 @@
                 if (error) throw error;
                 state.gastos = data || [];
             } catch (err) {
-                console.warn('⚠️ Error cargando gastos:', err.message);
                 state.gastos = [];
             }
         }
@@ -1745,7 +1750,7 @@
 
         function renderInventarioInicial() {
             if (!state.inventario_inicial || state.inventario_inicial.length === 0) {
-                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">📦 No hay datos de inventario inicial</p></div>`;
+                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">📦 Sin datos de inventario inicial</p></div>`;
             }
 
             const porMaquina = {};
@@ -1764,8 +1769,8 @@
                                     <th class="text-left p-2">Casillero</th>
                                     <th class="text-left p-2">Producto</th>
                                     <th class="text-left p-2">Familia</th>
-                                    <th class="text-center p-2">Cantidad Inicial</th>
-                                    <th class="text-center p-2">Cantidad Actual</th>
+                                    <th class="text-center p-2">Inicial</th>
+                                    <th class="text-center p-2">Actual</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1787,32 +1792,12 @@
 
         function renderGastos() {
             if (!state.gastos || state.gastos.length === 0) {
-                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">💰 No hay gastos registrados</p></div>`;
+                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">💰 Sin gastos registrados</p></div>`;
             }
 
-            const gastosPorCategoria = {};
-            state.gastos.forEach(gasto => {
-                if (!gastosPorCategoria[gasto.categoria]) {
-                    gastosPorCategoria[gasto.categoria] = { total: 0, items: [] };
-                }
-                gastosPorCategoria[gasto.categoria].total += gasto.monto_total || 0;
-                gastosPorCategoria[gasto.categoria].items.push(gasto);
-            });
-
             return `
-                <div class="bg-white rounded-lg shadow p-6 mb-6">
-                    <h3 class="text-xl font-bold mb-4">💰 Resumen de Gastos</h3>
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        ${Object.entries(gastosPorCategoria).map(([cat, data]) => `
-                            <div class="bg-blue-50 rounded p-4 border border-blue-200">
-                                <p class="text-sm text-gray-600">${cat}</p>
-                                <p class="text-2xl font-bold text-blue-600">$${data.total.toLocaleString('es-CL')}</p>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
                 <div class="bg-white rounded-lg shadow p-6">
-                    <h3 class="text-lg font-bold mb-4">Historial de Gastos</h3>
+                    <h3 class="text-lg font-bold mb-4">💰 Gastos</h3>
                     <div class="overflow-x-auto">
                         <table class="w-full text-sm">
                             <thead>
@@ -1820,8 +1805,6 @@
                                     <th class="text-left p-2">Fecha</th>
                                     <th class="text-left p-2">Categoría</th>
                                     <th class="text-left p-2">Descripción</th>
-                                    <th class="text-center p-2">Monto Neto</th>
-                                    <th class="text-center p-2">IVA</th>
                                     <th class="text-center p-2">Total</th>
                                 </tr>
                             </thead>
@@ -1831,9 +1814,7 @@
                                         <td class="p-2">${gasto.fecha}</td>
                                         <td class="p-2 font-bold">${gasto.categoria}</td>
                                         <td class="p-2 text-xs text-gray-600">${gasto.descripcion || '-'}</td>
-                                        <td class="p-2 text-center">$${gasto.monto_neto?.toLocaleString('es-CL') || 0}</td>
-                                        <td class="p-2 text-center">$${gasto.iva?.toLocaleString('es-CL') || 0}</td>
-                                        <td class="p-2 text-center font-bold">$${gasto.monto_total?.toLocaleString('es-CL') || 0}</td>
+                                        <td class="p-2 text-center">$${gasto.monto_total?.toLocaleString('es-CL') || 0}</td>
                                     </tr>
                                 `).join('')}
                             </tbody>
