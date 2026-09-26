@@ -968,6 +968,88 @@
         };
 
         // ============================================
+        // FUNCIONES HELPER - MÉTRICAS
+        // ============================================
+        function getStockCritico() {
+            return state.inventario.filter(item => 
+                item.cantidad_actual !== undefined && 
+                item.cantidad_minima !== undefined && 
+                item.cantidad_actual <= item.cantidad_minima
+            );
+        }
+
+        function getTotalVentasHoy() {
+            const hoy = new Date().toISOString().split('T')[0];
+            return state.ventas.filter(v => v.fecha?.startsWith(hoy))
+                .reduce((sum, v) => sum + (v.monto || 0), 0);
+        }
+
+        function getTransaccionesHoy() {
+            const hoy = new Date().toISOString().split('T')[0];
+            return state.ventas.filter(v => v.fecha?.startsWith(hoy)).length;
+        }
+
+        function getTicketPromedio() {
+            const hoy = new Date().toISOString().split('T')[0];
+            const ventasHoy = state.ventas.filter(v => v.fecha?.startsWith(hoy));
+            if (ventasHoy.length === 0) return 0;
+            const totalHoy = ventasHoy.reduce((sum, v) => sum + (v.monto || 0), 0);
+            return Math.round(totalHoy / ventasHoy.length);
+        }
+
+        function getComparativaHoyVsAyer() {
+            const hoy = new Date().toISOString().split('T')[0];
+            const ayer = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+            
+            const ventasHoy = state.ventas.filter(v => v.fecha?.startsWith(hoy))
+                .reduce((sum, v) => sum + (v.monto || 0), 0);
+            const ventasAyer = state.ventas.filter(v => v.fecha?.startsWith(ayer))
+                .reduce((sum, v) => sum + (v.monto || 0), 0);
+            
+            if (ventasAyer === 0) return { porcentaje: 0, diferencia: ventasHoy };
+            const porcentaje = Math.round(((ventasHoy - ventasAyer) / ventasAyer) * 100);
+            return { porcentaje, diferencia: ventasHoy - ventasAyer };
+        }
+
+        function getMaquinaMasProductiva() {
+            if (state.ventas.length === 0) return null;
+            const hoy = new Date().toISOString().split('T')[0];
+            const ventasPorMaquina = {};
+            
+            state.ventas.filter(v => v.fecha?.startsWith(hoy)).forEach(v => {
+                if (!ventasPorMaquina[v.maquina_id]) ventasPorMaquina[v.maquina_id] = 0;
+                ventasPorMaquina[v.maquina_id] += v.monto || 0;
+            });
+            
+            let maxMaquina = null;
+            let maxVentas = 0;
+            Object.entries(ventasPorMaquina).forEach(([maqId, ventas]) => {
+                if (ventas > maxVentas) {
+                    maxVentas = ventas;
+                    maxMaquina = state.maquinas.find(m => m.id === maqId);
+                }
+            });
+            
+            return { maquina: maxMaquina, ventas: maxVentas };
+        }
+
+        function getTopProductosHoy() {
+            const hoy = new Date().toISOString().split('T')[0];
+            const productosHoy = state.ventas
+                .filter(v => v.fecha?.startsWith(hoy))
+                .reduce((acc, v) => {
+                    if (!acc[v.producto_nombre]) acc[v.producto_nombre] = 0;
+                    acc[v.producto_nombre] += 1;
+                    return acc;
+                }, {});
+            
+            return Object.entries(productosHoy)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([nombre, cantidad]) => ({ nombre, cantidad }));
+        }
+
+        // ============================================
         // RENDER - INICIO
         // ============================================
         function renderDashboard() {
