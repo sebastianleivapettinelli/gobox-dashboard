@@ -1605,6 +1605,43 @@
             return res;
         }
 
+        // ============================================
+        // REPOSICIÓN: espacios de las máquinas con poco stock (estimado, descontando ventas desde el conteo)
+        // ============================================
+        const UMBRAL_REPONER_DEFECTO = 5;
+        window.setUmbralReponer = function(v) { state.umbralReponer = Math.max(0, parseInt(v, 10) || 0); render(); };
+
+        function stockEstimadoEspacio(maquina, a, ventasDesdeConteo) {
+            const cargado = Number(a.cantidad_asignada) || 0;
+            if (!getConfigConteo(maquina)) return cargado;
+            const v = ventasDesdeConteo[normEspacio(a.espacio)];
+            return Math.max(0, cargado - (v ? v.unidades : 0));
+        }
+
+        function getReposicion(umbral) {
+            const filtro = state.maquinaFiltro;
+            const filas = [];
+            state.maquinas.forEach(m => {
+                if (filtro && filtro !== 'todas' && String(m.id) !== String(filtro)) return;
+                const ventas = getConfigConteo(m) ? getVentasDesdeConteo(m) : {};
+                state.asignaciones.filter(a => String(a.maquina_id) === String(m.id)).forEach(a => {
+                    const quedan = stockEstimadoEspacio(m, a, ventas);
+                    if (quedan > umbral) return;
+                    const e = normEspacio(a.espacio);
+                    const prod = state.inventario.find(p => String(p.sku) === String(a.sku));
+                    const cap = capacidadEspacio(m, e) || 0;
+                    filas.push({
+                        maquina: m.nombre, espacio: e, pos: bandejaPos(e),
+                        producto: prod ? prod.nombre_producto : `${a.sku} (sin stock en bodega)`,
+                        sku: a.sku, quedan, cap, falta: cap ? Math.max(0, cap - quedan) : null,
+                        bodega: prod ? (Number(prod.cantidad_actual) || 0) : 0
+                    });
+                });
+            });
+            filas.sort((x, y) => x.quedan - y.quedan || x.maquina.localeCompare(y.maquina) || Number(x.espacio) - Number(y.espacio));
+            return filas;
+        }
+
         function getTopProductosHoy() {
             const porProducto = {};
             getVentasPeriodo().forEach(v => {
@@ -2384,6 +2421,10 @@
             const maquinaMasProductiva = getMaquinaMasProductiva();
             const topProductos = getTopProductosHoy();
             const stockCritico = getStockCritico();
+            const umbralRep = state.umbralReponer === undefined ? UMBRAL_REPONER_DEFECTO : state.umbralReponer;
+            const reposicion = getReposicion(umbralRep);
+            const totalesRep = {};
+            reposicion.forEach(r => { if (r.falta) { const t = totalesRep[r.producto] = totalesRep[r.producto] || { falta: 0, bodega: r.bodega }; t.falta += r.falta; } });
             const horaMayorVenta = getHoraMayorVenta();
 
             const compColor = comparativa.estado === 'positivo' ? 'text-green-600' : comparativa.estado === 'negativo' ? 'text-red-600' : 'text-gray-500';
@@ -2499,6 +2540,58 @@
                                 </div>
                             ` : `<p class="text-gray-500 text-sm">✓ Todo el stock está bien</p>`}
                         </div>
+                    </div>
+
+                    <!-- Reposición en máquinas -->
+                    <div class="bg-white p-6 rounded-lg shadow-md">
+                        <div class="flex flex-wrap justify-between items-center gap-3 mb-4">
+                            <h3 class="font-bold text-lg">🔄 Qué reponer en las máquinas</h3>
+                            <label class="text-sm text-gray-600 flex items-center gap-2">Mostrar espacios con
+                                <select onchange="window.setUmbralReponer(this.value)" class="border rounded px-2 py-1 font-bold">
+                                    ${[0, 1, 2, 3, 5, 8, 10].concat([umbralRep]).filter((x, i, arr) => arr.indexOf(x) === i).sort((a, b) => a - b).map(n => `<option value="${n}" ${n === umbralRep ? 'selected' : ''}>${n}</option>`).join('')}
+                                </select>
+                                o menos unidades
+                            </label>
+                        </div>
+                        ${reposicion.length ? `
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead class="bg-gray-100 text-xs uppercase text-gray-600">
+                                        <tr>
+                                            <th class="text-left p-2">Máquina</th>
+                                            <th class="text-left p-2">Espacio</th>
+                                            <th class="text-left p-2">Producto</th>
+                                            <th class="text-right p-2">Quedan</th>
+                                            <th class="text-right p-2">Capacidad</th>
+                                            <th class="text-right p-2">Llevar</th>
+                                            <th class="text-right p-2">Bodega</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${reposicion.map(r => `
+                                            <tr class="border-t ${r.quedan === 0 ? 'bg-red-50' : ''}">
+                                                <td class="p-2">${esc(r.maquina)}</td>
+                                                <td class="p-2 font-mono">${esc(r.espacio)} <span class="text-xs text-gray-500">${esc(r.pos)}</span></td>
+                                                <td class="p-2 font-semibold">${esc(r.producto)}</td>
+                                                <td class="p-2 text-right"><span class="font-bold px-2 py-0.5 rounded-full ${r.quedan === 0 ? 'bg-red-600 text-white' : 'bg-orange-100 text-orange-800'}">${r.quedan === 0 ? 'Agotado' : r.quedan}</span></td>
+                                                <td class="p-2 text-right text-gray-600">${r.cap || '—'}</td>
+                                                <td class="p-2 text-right font-bold text-blue-700">${r.falta === null ? '—' : r.falta}</td>
+                                                <td class="p-2 text-right ${r.falta !== null && r.bodega < r.falta ? 'text-red-600 font-bold' : 'text-gray-600'}">${r.bodega}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                            ${Object.keys(totalesRep).length ? `
+                                <div class="mt-4 p-3 bg-blue-50 border border-blue-200 rounded text-sm">
+                                    <div class="font-bold mb-2">🛒 Total a llevar para llenar (por producto)</div>
+                                    <div class="flex flex-wrap gap-2">
+                                        ${Object.entries(totalesRep).sort((a, b) => b[1].falta - a[1].falta).map(([nombre, t]) => `<span class="px-2 py-1 rounded-full bg-white border ${t.bodega < t.falta ? 'border-red-400 text-red-700' : 'border-blue-300 text-blue-900'}" title="Bodega: ${t.bodega}">${esc(nombre)}: <strong>${t.falta}</strong>${t.bodega < t.falta ? ' ⚠ bodega ' + t.bodega : ''}</span>`).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                            <p class="text-xs text-gray-500 mt-3">Quedan = cantidad cargada − ventas desde el conteo base (ver Asignaciones). Llevar = capacidad − quedan. Bodega en rojo: no alcanza para llenar. Respeta el filtro de máquina.</p>
+                        ` : `<p class="text-gray-500 text-sm">✓ Ningún espacio con ${umbralRep} unidades o menos.</p>`}
                     </div>
                 </div>
             `;
