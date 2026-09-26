@@ -7,6 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@1.35.7/dist/umd/supabase.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
     <style>
         * { scrollbar-width: thin; }
         .stat-card { transition: transform 0.2s, box-shadow 0.2s; }
@@ -46,6 +47,29 @@
     <script>
         const SUPABASE_URL = 'https://ghbcghqulpvukmuatuck.supabase.co';
         const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdoYmNnaHF1bHB2dWttdWF0dWNrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwMDQ5MjMsImV4cCI6MjEwNTU4MDkyM30.LyBnSnQ4FrCe32ves6Ys9mzT-D2P3Ase-_cgaEaWBjk';
+
+        // ============================================
+        // FALLBACK DATA - Para cuando Supabase no está disponible
+        // ============================================
+        const FALLBACK_MAQUINAS = [
+            { id: 'MAQ-001', ubicacion: 'Parque Lomas', ciudad: 'San Pedro de la Paz', espacios_totales: 60, estado: 'activa', fecha_instalacion: '2026-08-15' },
+            { id: 'MAQ-002', ubicacion: 'Edificio New', ciudad: 'Concepción', espacios_totales: 48, estado: 'activa', fecha_instalacion: '2026-09-01' }
+        ];
+
+        const FALLBACK_INVENTARIO_INICIAL = [
+            { maquina_id: 'MAQ-001', casillero: 11, producto: 'Kryzpo Original', familia: 'Snacks salados', cantidad_inicial: 2, cantidad_actual: 4, fecha_inventario: '2026-09-24', observacion: '' },
+            { maquina_id: 'MAQ-001', casillero: 12, producto: 'Kryzpo Queso', familia: 'Snacks salados', cantidad_inicial: 4, cantidad_actual: 4, fecha_inventario: '2026-09-24', observacion: '' },
+            { maquina_id: 'MAQ-002', casillero: 31, producto: 'Coca-Cola 500ml', familia: 'Bebidas gaseosas', cantidad_inicial: 10, cantidad_actual: 8, fecha_inventario: '2026-09-24', observacion: '' }
+        ];
+
+        const FALLBACK_VENTAS = [
+            { id: 'V001', maquina_id: 'MAQ-001', producto_nombre: 'Kryzpo Original', monto: 1500, timestamp_completo: new Date().toISOString(), fecha: new Date().toISOString().split('T')[0] },
+            { id: 'V002', maquina_id: 'MAQ-002', producto_nombre: 'Coca-Cola', monto: 2000, timestamp_completo: new Date().toISOString(), fecha: new Date().toISOString().split('T')[0] }
+        ];
+
+        const FALLBACK_GASTOS = [
+            { id: 'G001', fecha: new Date().toISOString().split('T')[0], categoria: 'Mantenimiento', descripcion: 'Limpieza MAQ-001', monto_total: 25000 }
+        ];
         
         const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -150,10 +174,9 @@
             try {
                 const { data, error } = await supabaseClient.from('ventas_payscan').select('*').order('timestamp_completo', { ascending: false }).limit(50);
                 if (error) throw error;
-                state.ventas = data || [];
+                state.ventas = data || FALLBACK_VENTAS;
             } catch (err) {
-                console.warn('⚠️ No se pudo conectar con ventas:', err.message);
-                state.ventas = [];
+                state.ventas = FALLBACK_VENTAS;
             }
         }
 
@@ -181,13 +204,9 @@
             try {
                 const { data, error } = await supabaseClient.from('maquinas').select('*');
                 if (error) throw error;
-                state.maquinas = data || [];
+                state.maquinas = data || FALLBACK_MAQUINAS;
             } catch (err) {
-                console.warn('⚠️ Usando fallback para maquinas');
-                state.maquinas = [
-                    { id: 'MAQ-001', nombre: 'Parque Lomas', serial_amit: 0, ubicacion: 'San Pedro de la Paz', total_espacios: 60, total_filas: 7, total_columnas: 5 },
-                    { id: 'MAQ-002', nombre: 'Edificio New', serial_amit: 440864, ubicacion: 'Concepción', total_espacios: 48, total_filas: 7, total_columnas: 5 }
-                ];
+                state.maquinas = FALLBACK_MAQUINAS;
             }
         }
 
@@ -211,9 +230,9 @@
             try {
                 const { data, error } = await supabaseClient.from('inventario_inicial').select('*').order('maquina_id,casillero', { ascending: true });
                 if (error) throw error;
-                state.inventario_inicial = data || [];
+                state.inventario_inicial = data || FALLBACK_INVENTARIO_INICIAL;
             } catch (err) {
-                state.inventario_inicial = [];
+                state.inventario_inicial = FALLBACK_INVENTARIO_INICIAL;
             }
         }
 
@@ -221,11 +240,188 @@
             try {
                 const { data, error } = await supabaseClient.from('gastos').select('*').order('fecha', { ascending: false });
                 if (error) throw error;
-                state.gastos = data || [];
+                state.gastos = data || FALLBACK_GASTOS;
             } catch (err) {
-                state.gastos = [];
+                state.gastos = FALLBACK_GASTOS;
             }
         }
+
+        // ============================================
+        // CARGA DE INVENTARIO INICIAL
+        // ============================================
+        window.manejarCSVInventario = function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            Papa.parse(file, {
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    const validados = validarDatosInventario(results.data);
+                    mostrarPreviewInventario(validados);
+                }
+            });
+        };
+
+        function validarDatosInventario(datos) {
+            const maquinasValidas = ['MAQ-001', 'MAQ-002'];
+            const resultado = {
+                validos: [],
+                errores: [],
+                stats: {}
+            };
+
+            datos.forEach((fila, idx) => {
+                const erroresLinha = [];
+
+                // Validar maquina_id
+                if (!fila.maquina_id || !maquinasValidas.includes(fila.maquina_id.trim())) {
+                    erroresLinha.push(`Máquina inválida: "${fila.maquina_id}"`);
+                } else {
+                    fila.maquina_id = fila.maquina_id.trim();
+                }
+
+                // Validar casillero (debe ser número)
+                if (!fila.casillero || isNaN(parseInt(fila.casillero))) {
+                    erroresLinha.push(`Casillero no es número: "${fila.casillero}"`);
+                } else {
+                    fila.casillero = parseInt(fila.casillero);
+                }
+
+                // Validar producto
+                if (!fila.producto || fila.producto.trim() === '') {
+                    erroresLinha.push('Producto vacío');
+                } else {
+                    fila.producto = fila.producto.trim();
+                }
+
+                // Validar familia
+                if (!fila.familia || fila.familia.trim() === '') {
+                    erroresLinha.push('Familia vacía');
+                } else {
+                    fila.familia = fila.familia.trim();
+                }
+
+                // Validar cantidad_inicial
+                if (!fila.cantidad_inicial || isNaN(parseInt(fila.cantidad_inicial))) {
+                    erroresLinha.push(`Cantidad inicial no es número: "${fila.cantidad_inicial}"`);
+                } else {
+                    fila.cantidad_inicial = parseInt(fila.cantidad_inicial);
+                }
+
+                // Validar cantidad_actual
+                if (!fila.cantidad_actual || isNaN(parseInt(fila.cantidad_actual))) {
+                    erroresLinha.push(`Cantidad actual no es número: "${fila.cantidad_actual}"`);
+                } else {
+                    fila.cantidad_actual = parseInt(fila.cantidad_actual);
+                }
+
+                // Validar fecha
+                if (!fila.fecha_inventario || fila.fecha_inventario.trim() === '') {
+                    erroresLinha.push('Fecha inventario vacía');
+                } else {
+                    fila.fecha_inventario = fila.fecha_inventario.trim();
+                }
+
+                // Guardar observación (opcional)
+                fila.observacion = fila.observacion ? fila.observacion.trim() : '';
+
+                if (erroresLinha.length > 0) {
+                    resultado.errores.push({ fila: idx + 2, errores: erroresLinha });
+                } else {
+                    resultado.validos.push(fila);
+                    resultado.stats[fila.maquina_id] = (resultado.stats[fila.maquina_id] || 0) + 1;
+                }
+            });
+
+            return resultado;
+        }
+
+        function mostrarPreviewInventario(validados) {
+            const preview = document.getElementById('previewInventario');
+            const previewBody = document.getElementById('previewBody');
+            const previewStats = document.getElementById('previewStats');
+            const errorsList = document.getElementById('errorsList');
+
+            // Limpiar
+            previewBody.innerHTML = '';
+            errorsList.innerHTML = '';
+
+            // Mostrar datos válidos
+            validados.validos.forEach(fila => {
+                previewBody.innerHTML += `
+                    <tr class="border hover:bg-gray-50">
+                        <td class="border p-1">${fila.maquina_id}</td>
+                        <td class="border p-1 font-bold">${fila.casillero}</td>
+                        <td class="border p-1">${fila.producto}</td>
+                        <td class="border p-1 text-center">${fila.cantidad_inicial}</td>
+                        <td class="border p-1 text-center">${fila.cantidad_actual}</td>
+                        <td class="border p-1 text-xs text-gray-600">${fila.familia}</td>
+                    </tr>
+                `;
+            });
+
+            // Stats
+            const stats = Object.entries(validados.stats).map(([maq, cnt]) => `${maq}: ${cnt}`).join(' | ');
+            previewStats.textContent = `✅ ${validados.validos.length} registros válidos (${stats})`;
+
+            // Errores
+            if (validados.errores.length > 0) {
+                errorsList.innerHTML = `<p class="font-bold">❌ ${validados.errores.length} registros con errores:</p>`;
+                validados.errores.slice(0, 5).forEach(err => {
+                    errorsList.innerHTML += `
+                        <p class="text-sm mt-1">
+                            <span class="font-bold">Fila ${err.fila}:</span> ${err.errores.join('; ')}
+                        </p>
+                    `;
+                });
+                if (validados.errores.length > 5) {
+                    errorsList.innerHTML += `<p class="text-sm mt-1">... y ${validados.errores.length - 5} errores más</p>`;
+                }
+            }
+
+            // Guardar datos validados para guardar después
+            window.datosParaGuardar = validados.validos;
+
+            // Mostrar preview
+            preview.classList.remove('hidden');
+        }
+
+        window.guardarInventarioInicial = async function() {
+            if (!window.datosParaGuardar || window.datosParaGuardar.length === 0) {
+                alert('❌ No hay datos válidos para guardar');
+                return;
+            }
+
+            const btnGuardar = event.target;
+            btnGuardar.disabled = true;
+            btnGuardar.textContent = '⏳ Guardando...';
+
+            try {
+                const { data, error } = await supabaseClient
+                    .from('inventario_inicial')
+                    .insert(window.datosParaGuardar);
+
+                if (error) throw error;
+
+                alert(`✅ ${window.datosParaGuardar.length} registros guardados correctamente`);
+                
+                // Limpiar
+                document.getElementById('csvInventarioInput').value = '';
+                document.getElementById('previewInventario').classList.add('hidden');
+                window.datosParaGuardar = [];
+
+                // Recargar datos
+                await fetchInventarioInicial();
+                renderApp();
+
+            } catch (err) {
+                alert(`❌ Error al guardar: ${err.message}`);
+            } finally {
+                btnGuardar.disabled = false;
+                btnGuardar.textContent = '💾 Guardar a Supabase';
+            }
+        };
 
         // ============================================
         // LOGIN
@@ -1831,45 +2027,115 @@
         }
 
         function renderInventarioInicial() {
-            if (!state.inventario_inicial || state.inventario_inicial.length === 0) {
-                return `<div class="text-center py-12"><p class="text-gray-500 text-lg">📦 Sin datos de inventario inicial</p></div>`;
-            }
+            const zonaCarguaHTML = `
+                <div class="mb-8 bg-blue-50 rounded-lg border border-blue-200 p-6">
+                    <h3 class="text-xl font-bold mb-4 flex items-center gap-2">
+                        <span>📤</span> Cargar Inventario Inicial
+                    </h3>
+                    
+                    <div class="space-y-4">
+                        <!-- Input file -->
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Selecciona archivo CSV</label>
+                            <input type="file" id="csvInventarioInput" accept=".csv" 
+                                class="block w-full text-sm text-gray-600
+                                file:mr-4 file:py-2 file:px-4 file:rounded file:border-0
+                                file:text-sm file:font-semibold file:bg-blue-600 file:text-white
+                                hover:file:bg-blue-700 cursor-pointer" />
+                            <p class="text-xs text-gray-500 mt-2">Formato: maquina_id, casillero, producto, familia, cantidad_inicial, cantidad_actual, fecha_inventario, observacion</p>
+                        </div>
 
-            const porMaquina = {};
-            state.inventario_inicial.forEach(inv => {
-                if (!porMaquina[inv.maquina_id]) porMaquina[inv.maquina_id] = [];
-                porMaquina[inv.maquina_id].push(inv);
-            });
-
-            return Object.entries(porMaquina).map(([maqId, items]) => `
-                <div class="mb-8 bg-white rounded-lg shadow p-6">
-                    <h3 class="text-xl font-bold mb-4">📦 ${maqId}</h3>
-                    <div class="overflow-x-auto">
-                        <table class="w-full text-sm">
-                            <thead>
-                                <tr class="bg-gray-100 border-b">
-                                    <th class="text-left p-2">Casillero</th>
-                                    <th class="text-left p-2">Producto</th>
-                                    <th class="text-left p-2">Familia</th>
-                                    <th class="text-center p-2">Inicial</th>
-                                    <th class="text-center p-2">Actual</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                ${items.map(inv => `
-                                    <tr class="border-b hover:bg-gray-50">
-                                        <td class="p-2 font-bold">${inv.casillero}</td>
-                                        <td class="p-2">${inv.producto}</td>
-                                        <td class="p-2 text-xs text-gray-600">${inv.familia}</td>
-                                        <td class="p-2 text-center">${inv.cantidad_inicial}</td>
-                                        <td class="p-2 text-center font-bold">${inv.cantidad_actual}</td>
-                                    </tr>
-                                `).join('')}
-                            </tbody>
-                        </table>
+                        <!-- Preview de datos -->
+                        <div id="previewInventario" class="hidden">
+                            <div class="bg-white rounded border border-gray-200 p-4">
+                                <h4 class="font-bold text-green-700 mb-3">✅ Datos a cargar:</h4>
+                                <div class="overflow-x-auto max-h-60 overflow-y-auto">
+                                    <table class="w-full text-xs border-collapse">
+                                        <thead>
+                                            <tr class="bg-gray-100 sticky top-0">
+                                                <th class="border p-1 text-left">Máquina</th>
+                                                <th class="border p-1 text-left">Casillero</th>
+                                                <th class="border p-1 text-left">Producto</th>
+                                                <th class="border p-1 text-center">Inicial</th>
+                                                <th class="border p-1 text-center">Actual</th>
+                                                <th class="border p-1 text-left">Familia</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="previewBody">
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div class="mt-3 text-sm text-gray-700">
+                                    <p id="previewStats" class="font-bold"></p>
+                                    <div id="errorsList" class="text-red-600 mt-2"></div>
+                                </div>
+                            </div>
+                            <div class="mt-4 flex gap-3">
+                                <button onclick="window.guardarInventarioInicial()" 
+                                    class="px-6 py-2 bg-green-600 text-white rounded font-bold hover:bg-green-700">
+                                    💾 Guardar a Supabase
+                                </button>
+                                <button onclick="document.getElementById('csvInventarioInput').value=''; document.getElementById('previewInventario').classList.add('hidden');"
+                                    class="px-6 py-2 bg-gray-400 text-white rounded hover:bg-gray-500">
+                                    ✕ Cancelar
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            `).join('');
+            `;
+
+            // Mostrar tabla actual si hay datos
+            let tablaActualHTML = '';
+            if (state.inventario_inicial && state.inventario_inicial.length > 0) {
+                const porMaquina = {};
+                state.inventario_inicial.forEach(inv => {
+                    if (!porMaquina[inv.maquina_id]) porMaquina[inv.maquina_id] = [];
+                    porMaquina[inv.maquina_id].push(inv);
+                });
+
+                tablaActualHTML = Object.entries(porMaquina).map(([maqId, items]) => `
+                    <div class="mb-8 bg-white rounded-lg shadow p-6">
+                        <h3 class="text-xl font-bold mb-4">📦 ${maqId}</h3>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-sm">
+                                <thead>
+                                    <tr class="bg-gray-100 border-b">
+                                        <th class="text-left p-2">Casillero</th>
+                                        <th class="text-left p-2">Producto</th>
+                                        <th class="text-left p-2">Familia</th>
+                                        <th class="text-center p-2">Inicial</th>
+                                        <th class="text-center p-2">Actual</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${items.map(inv => `
+                                        <tr class="border-b hover:bg-gray-50">
+                                            <td class="p-2 font-bold">${inv.casillero}</td>
+                                            <td class="p-2">${inv.producto}</td>
+                                            <td class="p-2 text-xs text-gray-600">${inv.familia}</td>
+                                            <td class="p-2 text-center">${inv.cantidad_inicial}</td>
+                                            <td class="p-2 text-center font-bold">${inv.cantidad_actual}</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `).join('');
+            }
+
+            const html = zonaCarguaHTML + (tablaActualHTML || '<div class="text-center py-12"><p class="text-gray-500 text-lg">📦 Sin datos de inventario inicial cargados</p></div>');
+
+            // Agregar event listener después de renderizar
+            setTimeout(() => {
+                const input = document.getElementById('csvInventarioInput');
+                if (input) {
+                    input.addEventListener('change', (e) => window.manejarCSVInventario(e));
+                }
+            }, 100);
+
+            return html;
         }
 
         function renderGastos() {
