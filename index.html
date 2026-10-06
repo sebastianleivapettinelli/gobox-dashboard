@@ -1545,11 +1545,14 @@
         // Cuando hagas un nuevo conteo o reposición, actualiza aquí la hora y la cantidad en Asignaciones.
         //   bandejas: hora del conteo por bandeja (1 = espacios 1-10 … 6 = 51-60)
         //   todas:    hora única para toda la máquina (o para las bandejas no listadas)
-        // La reposición del vie 25-09 19:06–19:10 en Parque Lomas NO se usa como base (decisión del usuario).
-        // Para usarla, reemplaza el bloque de Parque Lomas por:  { todas: '2026-09-25T19:10' }
+        // El conteo por bandeja del jue 24-09 y la reposición del vie 25-09 19:06–19:10 en
+        // Parque Lomas quedaron superados por el reconteo/reposición del vie 02-10-2026 22:51
+        // (nuevo layout con productos distintos en varios espacios). Para volver al conteo
+        // por bandeja del 24-09, usa:
+        // { bandejas: { 1: '2026-09-24T20:02', 2: '2026-09-24T19:54', 3: '2026-09-24T19:48', 4: '2026-09-24T19:42', 5: '2026-09-24T19:39', 6: '2026-09-24T19:34' } }
         // ============================================
         const CONTEO_BASE = {
-            'parque lomas': { bandejas: { 1: '2026-09-24T20:02', 2: '2026-09-24T19:54', 3: '2026-09-24T19:48', 4: '2026-09-24T19:42', 5: '2026-09-24T19:39', 6: '2026-09-24T19:34' } },
+            'parque lomas': { todas: '2026-10-02T22:51' },   // reconteo/reposición con layout nuevo (viernes 02-10-2026 22:51)
             'edificio new': { todas: '2026-10-02T21:43' }   // nuevo layout (viernes 02-10-2026 21:43); reemplaza la fecha anterior (mié 23-09 20:30, por dictado)
         };
 
