@@ -1645,6 +1645,216 @@
             return filas;
         }
 
+        // ============================================
+        // PRÓXIMOS A VENCER (semáforo). Usa la fecha de caducidad de inventario_bodega (una fecha por producto).
+        // Solo lista productos que tengan unidades (bodega + máquinas estimado). Umbrales en días:
+        //   rojo: vencido o ≤ 7 · amarillo: ≤ 30 · verde: ≤ 60
+        // ============================================
+        const VENCE_ROJO = 7, VENCE_AMARILLO = 30, VENCE_VERDE = 60;
+
+        // Días calendario desde hoy (hora local) hasta la fecha 'YYYY-MM-DD'. Negativo = ya vencido. null si no hay fecha válida.
+        function diasParaVencer(fechaStr) {
+            const m = String(fechaStr || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (!m) return null;
+            const [hy, hm, hd] = fechaLocal().split('-').map(Number);
+            return Math.round((Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - Date.UTC(hy, hm - 1, hd)) / 86400000);
+        }
+
+        function textoDiasVencer(dias) {
+            if (dias < 0) return `vencido hace ${-dias} ${-dias === 1 ? 'día' : 'días'}`;
+            if (dias === 0) return 'vence hoy';
+            if (dias === 1) return 'vence mañana';
+            return `en ${dias} días`;
+        }
+
+        // Unidades estimadas hoy dentro de las máquinas, por SKU (cargado − ventas desde el conteo base)
+        function getUnidadesEnMaquinasPorSku() {
+            const por = {};
+            state.maquinas.forEach(m => {
+                const ventas = getConfigConteo(m) ? getVentasDesdeConteo(m) : {};
+                state.asignaciones.filter(a => String(a.maquina_id) === String(m.id)).forEach(a => {
+                    por[a.sku] = (por[a.sku] || 0) + stockEstimadoEspacio(m, a, ventas);
+                });
+            });
+            return por;
+        }
+
+        function getProximosVencer() {
+            const enMaq = getUnidadesEnMaquinasPorSku();
+            const filas = [];
+            let sinFecha = 0;
+            state.inventario.forEach(p => {
+                const bodega = Number(p.cantidad_actual) || 0;
+                const maq = enMaq[p.sku] || 0;
+                if (bodega + maq <= 0) return;
+                const dias = diasParaVencer(p.fecha_caducidad);
+                if (dias === null) { sinFecha++; return; }
+                if (dias > VENCE_VERDE) return;
+                const nivel = dias <= VENCE_ROJO ? 'rojo' : dias <= VENCE_AMARILLO ? 'amarillo' : 'verde';
+                filas.push({ nombre: p.nombre_producto, fecha: p.fecha_caducidad, dias, nivel, bodega, maq });
+            });
+            filas.sort((a, b) => a.dias - b.dias || String(a.nombre).localeCompare(String(b.nombre)));
+            return { filas, sinFecha };
+        }
+
+        function renderProximosVencer() {
+            const { filas, sinFecha } = getProximosVencer();
+            const MAX = 12;
+            const estilos = {
+                rojo:     { fila: 'bg-red-50 border-red-500',       texto: 'text-red-900',    sub: 'text-red-700',    punto: 'bg-red-500',    chip: 'bg-red-100 text-red-800' },
+                amarillo: { fila: 'bg-yellow-50 border-yellow-400', texto: 'text-yellow-900', sub: 'text-yellow-800', punto: 'bg-yellow-400', chip: 'bg-yellow-100 text-yellow-800' },
+                verde:    { fila: 'bg-green-50 border-green-500',   texto: 'text-green-900',  sub: 'text-green-700',  punto: 'bg-green-500',  chip: 'bg-green-100 text-green-800' }
+            };
+            const chip = n => `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full ${estilos[n].chip}"><span class="w-2.5 h-2.5 rounded-full ${estilos[n].punto}"></span>${filas.filter(f => f.nivel === n).length}</span>`;
+            return `
+                <div class="mt-6 pt-5 border-t">
+                    <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                        <h4 class="font-bold text-base">📅 Próximos a vencer</h4>
+                        <div class="flex gap-2 text-xs font-bold">${chip('rojo')}${chip('amarillo')}${chip('verde')}</div>
+                    </div>
+                    ${filas.length ? `
+                        <div class="space-y-2">
+                            ${filas.slice(0, MAX).map(f => { const s = estilos[f.nivel]; return `
+                                <div class="flex items-center gap-3 p-3 border-l-4 rounded ${s.fila}">
+                                    <span class="w-3 h-3 rounded-full flex-shrink-0 ${s.punto}" title="${f.nivel}"></span>
+                                    <div class="min-w-0 flex-1">
+                                        <div class="text-sm font-semibold truncate ${s.texto}">${esc(f.nombre)}</div>
+                                        <div class="text-xs ${s.sub}">${fmtFecha(f.fecha)} · ${textoDiasVencer(f.dias)}</div>
+                                    </div>
+                                    <div class="text-xs text-right text-gray-700 whitespace-nowrap">Bodega <strong>${f.bodega}</strong><br>Máq. <strong>${f.maq}</strong></div>
+                                </div>`; }).join('')}
+                        </div>
+                        ${filas.length > MAX ? `<p class="text-xs text-gray-500 mt-2">+${filas.length - MAX} más con vencimiento más lejano.</p>` : ''}
+                    ` : `<p class="text-gray-500 text-sm">✓ Ningún producto con unidades vence en los próximos ${VENCE_VERDE} días.</p>`}
+                    <p class="text-xs text-gray-500 mt-3">🔴 vencido o ≤ ${VENCE_ROJO} días · 🟡 ≤ ${VENCE_AMARILLO} días · 🟢 ≤ ${VENCE_VERDE} días. Unidades = bodega + máquinas (estimado). Solo productos con unidades.${sinFecha ? ` <span class="text-amber-700 font-semibold">${sinFecha} producto${sinFecha === 1 ? '' : 's'} con unidades no ${sinFecha === 1 ? 'tiene' : 'tienen'} fecha de caducidad cargada.</span>` : ''}</p>
+                </div>`;
+        }
+
+        // ============================================
+        // ROTACIÓN: productos cargados en las máquinas que NO vendieron nada en la ventana elegida.
+        // La ventana termina en el último día con ventas importadas. Respeta el filtro de máquina.
+        // Sugerencias de reemplazo: productos de la misma familia con más unidades vendidas en la ventana (todas las máquinas).
+        // ============================================
+        const VENTANAS_ROTACION = [7, 14, 30, 60];
+        const VENTANA_ROTACION_DEFECTO = 30;
+        window.setVentanaRotacion = function(v) { state.ventanaRotacion = Math.max(1, parseInt(v, 10) || VENTANA_ROTACION_DEFECTO); render(); };
+
+        function getRotacionProductos(dias) {
+            const hasta = getUltimaFechaConVentas();
+            if (!hasta) return null;
+            const desde = addDias(hasta, -(dias - 1));
+            const invPorSku = {};
+            state.inventario.forEach(p => { invPorSku[p.sku] = p; });
+
+            // Unidades vendidas por SKU en la ventana (todas las máquinas) y primera fecha con datos
+            const vendidas = {};
+            let primera = '';
+            state.ventas.forEach(v => {
+                if (!esVentaValida(v)) return;
+                const f = fechaDeVenta(v);
+                if (!f) return;
+                if (!primera || f < primera) primera = f;
+                if (f < desde || f > hasta) return;
+                const m = getMaquinaDeVenta(v);
+                if (!m) return;
+                const a = getAsignacion(m.id, v.espacio);
+                if (!a) return;
+                const r = vendidas[a.sku] = vendidas[a.sku] || { total: 0, porMaquina: {} };
+                const u = unidadesDeVenta(v);
+                r.total += u;
+                r.porMaquina[m.id] = (r.porMaquina[m.id] || 0) + u;
+            });
+
+            // Productos hoy en las máquinas del filtro, con unidades (estimadas) en su interior
+            const filtro = state.maquinaFiltro;
+            const enMaq = {};
+            state.maquinas.forEach(m => {
+                if (filtro && filtro !== 'todas' && String(m.id) !== String(filtro)) return;
+                const ventasConteo = getConfigConteo(m) ? getVentasDesdeConteo(m) : {};
+                state.asignaciones.filter(a => String(a.maquina_id) === String(m.id)).forEach(a => {
+                    const quedan = stockEstimadoEspacio(m, a, ventasConteo);
+                    if (quedan <= 0) return;   // agotado: no se puede juzgar su rotación
+                    const e = enMaq[a.sku] = enMaq[a.sku] || { unidades: 0, maquinas: new Set(), vendidas: 0 };
+                    e.unidades += quedan;
+                    e.maquinas.add(m.nombre);
+                    e.vendidas += (vendidas[a.sku] && vendidas[a.sku].porMaquina[m.id]) || 0;
+                });
+            });
+
+            const sinRotar = Object.entries(enMaq).filter(([, e]) => e.vendidas === 0).map(([sku]) => sku);
+            const setSin = new Set(sinRotar);
+
+            const candidatos = Object.entries(vendidas)
+                .filter(([sku, d]) => d.total > 0 && !setSin.has(sku) && invPorSku[sku])
+                .map(([sku, d]) => ({ sku, nombre: invPorSku[sku].nombre_producto, familia: invPorSku[sku].familia || '', unidades: d.total, bodega: Number(invPorSku[sku].cantidad_actual) || 0 }))
+                .sort((a, b) => b.unidades - a.unidades || String(a.nombre).localeCompare(String(b.nombre)));
+
+            const filas = sinRotar.map(sku => {
+                const p = invPorSku[sku];
+                const e = enMaq[sku];
+                const familia = p ? (p.familia || '') : '';
+                return {
+                    nombre: p ? p.nombre_producto : sku,
+                    familia,
+                    maquinas: [...e.maquinas],
+                    unidades: e.unidades,
+                    bodega: p ? (Number(p.cantidad_actual) || 0) : 0,
+                    sugerencias: familia ? candidatos.filter(c => c.familia === familia).slice(0, 3) : []
+                };
+            }).sort((a, b) => b.unidades - a.unidades || String(a.nombre).localeCompare(String(b.nombre)));
+
+            const desdeEfectivo = primera && primera > desde ? primera : desde;
+            const utc = f => { const [y, mo, d] = f.split('-').map(Number); return Date.UTC(y, mo - 1, d); };
+            const diasDatos = Math.round((utc(hasta) - utc(desdeEfectivo)) / 86400000) + 1;
+            return { desde: desdeEfectivo, hasta, diasDatos, filas };
+        }
+
+        function renderRotacionProductos() {
+            const dias = state.ventanaRotacion === undefined ? VENTANA_ROTACION_DEFECTO : state.ventanaRotacion;
+            const r = getRotacionProductos(dias);
+            const opciones = VENTANAS_ROTACION.concat([dias]).filter((x, i, arr) => arr.indexOf(x) === i).sort((a, b) => a - b);
+            return `
+                <div class="mt-6 pt-5 border-t">
+                    <div class="flex flex-wrap justify-between items-center gap-3 mb-3">
+                        <h4 class="font-bold text-base">🐢 Productos que no han rotado</h4>
+                        <label class="text-sm text-gray-600 flex items-center gap-2">Sin ventas en los últimos
+                            <select onchange="window.setVentanaRotacion(this.value)" class="border rounded px-2 py-1 font-bold">
+                                ${opciones.map(n => `<option value="${n}" ${n === dias ? 'selected' : ''}>${n}</option>`).join('')}
+                            </select>
+                            días
+                        </label>
+                    </div>
+                    ${!r ? `<p class="text-gray-500 text-sm">Sin ventas importadas para medir la rotación.</p>` : `
+                        <p class="text-xs text-gray-500 mb-3">Ventas del ${fmtFecha(r.desde)} al ${fmtFecha(r.hasta)} (${r.diasDatos} ${r.diasDatos === 1 ? 'día' : 'días'} de datos${r.diasDatos < dias ? ' — menos que la ventana elegida' : ''}).</p>
+                        ${r.filas.length ? `
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead class="bg-gray-100 text-xs uppercase text-gray-600">
+                                        <tr>
+                                            <th class="text-left p-2">Producto</th>
+                                            <th class="text-right p-2">En máquinas</th>
+                                            <th class="text-right p-2">Bodega</th>
+                                            <th class="text-left p-2">Sugerencia: cambiar por (vendidas)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${r.filas.map(f => `
+                                            <tr class="border-t align-top">
+                                                <td class="p-2"><div class="font-semibold">${esc(f.nombre)}</div><div class="text-xs text-gray-500">${esc(f.familia) || 'sin familia'} · ${f.maquinas.map(esc).join(', ')}</div></td>
+                                                <td class="p-2 text-right font-bold text-orange-700">${f.unidades}</td>
+                                                <td class="p-2 text-right text-gray-600">${f.bodega}</td>
+                                                <td class="p-2">${f.sugerencias.length ? `<div class="flex flex-wrap gap-1">${f.sugerencias.map(c => `<span class="px-2 py-1 rounded-full bg-green-50 border border-green-300 text-green-900 text-xs" title="${c.bodega > 0 ? 'Bodega: ' + c.bodega : 'Sin stock en bodega'}">↗ ${esc(c.nombre)} <strong>${c.unidades}</strong>${c.bodega > 0 ? '' : ' <span class="text-red-600 font-semibold">· sin bodega</span>'}</span>`).join('')}</div>` : `<span class="text-xs text-gray-500">Sin candidatos de la misma familia con ventas — evalúa cambiar el producto.</span>`}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-3">Un producto aparece aquí si tiene unidades en las máquinas${state.maquinaFiltro && state.maquinaFiltro !== 'todas' ? ' del filtro' : ''} y no registró ninguna venta en la ventana. Sugerencias: productos de la misma familia con más unidades vendidas en la ventana (todas las máquinas); verifica que quepan en el espacio. Las ventas se asignan al producto que hoy ocupa cada espacio: si cambiaste el layout dentro de la ventana, las ventas anteriores cuentan para el producto nuevo.</p>
+                        ` : `<p class="text-gray-500 text-sm">✓ Todos los productos con unidades en las máquinas tuvieron ventas en los últimos ${dias} días.</p>`}
+                    `}
+                </div>`;
+        }
+
         function getTopProductosHoy() {
             const porProducto = {};
             getVentasPeriodo().forEach(v => {
@@ -2542,6 +2752,7 @@
                                     `).join('')}
                                 </div>
                             ` : `<p class="text-gray-500 text-sm">✓ Todo el stock está bien</p>`}
+                            ${renderProximosVencer()}
                         </div>
                     </div>
 
@@ -2595,6 +2806,7 @@
                             ` : ''}
                             <p class="text-xs text-gray-500 mt-3">Quedan = cantidad cargada − ventas desde el conteo base (ver Asignaciones). Llevar = capacidad − quedan. Bodega en rojo: no alcanza para llenar. Respeta el filtro de máquina.</p>
                         ` : `<p class="text-gray-500 text-sm">✓ Ningún espacio con ${umbralRep} unidades o menos.</p>`}
+                        ${renderRotacionProductos()}
                     </div>
                 </div>
             `;
