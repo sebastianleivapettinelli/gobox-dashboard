@@ -1707,9 +1707,9 @@
             };
             const chip = n => `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full ${estilos[n].chip}"><span class="w-2.5 h-2.5 rounded-full ${estilos[n].punto}"></span>${filas.filter(f => f.nivel === n).length}</span>`;
             return `
-                <div class="mt-6 pt-5 border-t">
-                    <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-                        <h4 class="font-bold text-base">📅 Próximos a vencer</h4>
+                <div>
+                    <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+                        <h3 class="font-bold text-lg">📅 Próximos a vencer</h3>
                         <div class="flex gap-2 text-xs font-bold">${chip('rojo')}${chip('amarillo')}${chip('verde')}</div>
                     </div>
                     ${filas.length ? `
@@ -2633,7 +2633,6 @@
             const comparativa = getComparativaHoyVsAyer();
             const maquinaMasProductiva = getMaquinaMasProductiva();
             const topProductos = getTopProductosHoy();
-            const stockCritico = getStockCritico();
             const umbralRep = state.umbralReponer === undefined ? UMBRAL_REPONER_DEFECTO : state.umbralReponer;
             const reposicion = getReposicion(umbralRep);
             const totalesRep = {};
@@ -2739,19 +2738,8 @@
                             ` : `<p class="text-gray-500 text-sm">Sin ventas en este período</p>`}
                         </div>
 
-                        <!-- Stock Crítico y Alertas -->
+                        <!-- Próximos a vencer (semáforo) -->
                         <div class="bg-white p-6 rounded-lg shadow-md">
-                            <h3 class="font-bold mb-4 text-lg">⚠️ Stock Crítico</h3>
-                            ${stockCritico.length > 0 ? `
-                                <div class="space-y-2">
-                                    ${stockCritico.map(p => `
-                                        <div class="flex justify-between items-center p-3 bg-red-50 border-l-4 border-red-500 rounded">
-                                            <span class="text-sm font-semibold text-red-900">${esc(p.nombre_producto)}</span>
-                                            <span class="text-sm font-bold text-red-600">${Number(p.cantidad_actual) || 0} unid.</span>
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            ` : `<p class="text-gray-500 text-sm">✓ Todo el stock está bien</p>`}
                             ${renderProximosVencer()}
                         </div>
                     </div>
