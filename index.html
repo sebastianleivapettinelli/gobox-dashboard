@@ -181,6 +181,10 @@
             repoMaquina: '',         // máquina elegida en la pestaña Reponer
             repoDraft: null,         // reposición en curso (se respalda en este navegador)
             repoGuardando: false,
+            repoBodegaRepId: '',     // reposición cuya bodega se está revisando
+            repoDevuelve: {},        // { repId: { sku: true/false } } ¿vuelve a bodega lo que salió?
+            repoBodegaGuardando: false,
+            repoBodegaError: '',
             repoError: '',
             loading: true,
             showNewProductForm: false,
@@ -546,7 +550,7 @@
         async function fetchReposiciones() {
             const { data, error } = await supabaseClient
                 .from('reposiciones')
-                .select('id, maquina_id, fecha_hora_local, detalle, notas, usuario, created_at')
+                .select('id, maquina_id, fecha_hora_local, detalle, notas, usuario, created_at, bodega_movimientos, bodega_aplicada_at, bodega_usuario')
                 .order('fecha_hora_local', { ascending: false })
                 .limit(200);
             if (error) { console.warn('Reposiciones no disponibles:', error.message); state.reposiciones = []; state.reposicionesOk = false; return false; }
@@ -582,6 +586,7 @@
         function limpiarDatos() {
             state.ventas = []; state.inventario = []; state.asignaciones = []; state.maquinas = []; state.historial = [];
             state.reposiciones = []; state.reposicionesOk = false; state.repoMaquina = ''; state.repoDraft = null; state.repoError = '';
+            state.repoBodegaRepId = ''; state.repoDevuelve = {}; state.repoBodegaError = '';
             state.selectedMachineForAssignment = null; state.editingMachine = null; state.editingProduct = null;
             state.showEditProductModal = false; state.showEditAssignmentModal = false; state.showScannerModal = false;
             state.showImportModal = false; state.importPreview = null;
@@ -1697,7 +1702,9 @@
         //  - Encontré = lo que había al abrir la máquina. Diferencia = encontré − esperado (negativo = faltan).
         //  - Dejé = lo que quedó al cerrar. Pasa a ser la nueva cantidad_asignada y la hora de la
         //    reposición pasa a ser el nuevo conteo base de TODA la máquina (función registrar_reposicion).
-        //  - La bodega NO se descuenta (regla vigente): la hoja de ruta solo muestra cuánto sacar.
+        //  - La bodega NO se descuenta sola: después de guardar, el paso 4 "Actualizar bodega" resta lo que
+        //    entró a la máquina y suma lo que volvió (v8, función aplicar_bodega_reposicion).
+        //  - Cambiar producto: el espacio queda con otro SKU y precio (v8, registrar_reposicion v2).
         //  - El borrador se respalda en este navegador para no perder lo anotado si se recarga la página.
         // ============================================
         const pad2 = n => String(n).padStart(2, '0');
@@ -1740,48 +1747,74 @@
             try { localStorage.setItem(repoClave(d.maquinaId), JSON.stringify(d)); } catch (e) {}
         }
 
+        // Fila de la hoja de ruta. Si en la reposición se cambia el producto del espacio (o.skuNuevo):
+        //   Encontré = unidades del producto ANTERIOR (todas salen de la máquina)
+        //   Dejé     = unidades del producto NUEVO
         function repoFilas(maquina, draft) {
             const baseDe = e => getBaseConteo(maquina, e);
             const fecha = RE_FECHA_MIN.test(draft.fecha || '') ? draft.fecha : ahoraLocalMin();
             const vend = unidadesVendidasEntre(maquina, baseDe, fecha);
+            const prodDe = sku => state.inventario.find(p => String(p.sku) === String(sku)) || null;
             return state.asignaciones
                 .filter(a => String(a.maquina_id) === String(maquina.id))
                 .sort((x, y) => Number(normEspacio(x.espacio)) - Number(normEspacio(y.espacio)))
                 .map(a => {
                     const e = normEspacio(a.espacio);
-                    const prod = state.inventario.find(p => String(p.sku) === String(a.sku)) || null;
+                    const prod = prodDe(a.sku);
+                    const o = draft.filas[e] || {};
+                    const cambio = !!(o.skuNuevo && String(o.skuNuevo) !== String(a.sku));
+                    const prodNuevo = cambio ? prodDe(o.skuNuevo) : null;
                     const cargado = Number(a.cantidad_asignada) || 0;
                     const base = baseDe(e);
                     const vendidas = vend[e] || 0;
                     const esperado = base ? Math.max(0, cargado - vendidas) : cargado;
                     const cap = capacidadEspacio(maquina, e);
                     const objetivo = cap || cargado;
-                    const o = draft.filas[e] || {};
                     const encontrado = Number.isInteger(o.encontrado) ? o.encontrado : esperado;
-                    const fin = Number.isInteger(o.final) ? o.final : Math.max(objetivo, encontrado);
+                    const fin = Number.isInteger(o.final) ? o.final : (cambio ? objetivo : Math.max(objetivo, encontrado));
+                    const precioActual = Number(a.precio_venta_espacio) || 0;
+                    const precioNuevo = cambio ? (Number.isInteger(o.precioNuevo) ? o.precioNuevo : (prodNuevo ? Number(prodNuevo.precio_venta_unitario) || 0 : 0)) : null;
+                    const entra = cambio ? prodNuevo : prod;
                     return {
                         a, e, prod, sku: a.sku, nombre: prod ? prod.nombre_producto : `${a.sku} (no está en bodega)`,
+                        cambio, abierto: !!o.cambiando, prodNuevo, skuNuevo: cambio ? String(o.skuNuevo) : null,
+                        nombreNuevo: prodNuevo ? prodNuevo.nombre_producto : (cambio ? String(o.skuNuevo) : ''),
+                        precioActual, precioNuevo,
                         cargado, base, vendidas, esperado, cap, objetivo, encontrado, final: fin,
                         diferencia: encontrado - esperado,
-                        llevar: Math.max(0, fin - encontrado),
-                        retirar: Math.max(0, encontrado - fin),
+                        // Unidades que entran a la máquina (del producto que queda) y que salen (del producto que estaba)
+                        llevar: cambio ? fin : Math.max(0, fin - encontrado),
+                        retirar: cambio ? encontrado : Math.max(0, encontrado - fin),
+                        skuEntra: cambio ? String(o.skuNuevo) : String(a.sku),
                         listo: !!o.listo,
                         costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0,
-                        dias: prod ? diasParaVencer(prod.fecha_caducidad) : null
+                        dias: prod ? diasParaVencer(prod.fecha_caducidad) : null,
+                        diasEntra: entra ? diasParaVencer(entra.fecha_caducidad) : null
                     };
                 });
         }
 
-        // Productos a sacar de bodega (suma de "llevar" por SKU)
+        // Productos a sacar de bodega. Si un producto sale de un espacio (cambio de lugar) y entra en otro,
+        // las unidades que salen sin estar vencidas se reutilizan y no hace falta sacarlas de bodega.
         function repoSacarBodega(filas) {
+            const prodDe = sku => state.inventario.find(p => String(p.sku) === String(sku)) || null;
             const por = {};
+            const fila = sku => {
+                if (!por[sku]) {
+                    const p = prodDe(sku);
+                    por[sku] = { sku, nombre: p ? p.nombre_producto : sku, familia: p ? (p.familia || '') : '', entra: 0, reusa: 0, espacios: [], bodega: p ? (Number(p.cantidad_actual) || 0) : 0 };
+                }
+                return por[sku];
+            };
             filas.forEach(f => {
-                if (!f.llevar) return;
-                const r = por[f.sku] = por[f.sku] || { sku: f.sku, nombre: f.nombre, familia: f.prod ? (f.prod.familia || '') : '', llevar: 0, espacios: [], bodega: f.prod ? (Number(f.prod.cantidad_actual) || 0) : 0 };
-                r.llevar += f.llevar;
-                r.espacios.push(f.e);
+                if (f.llevar) { const r = fila(f.skuEntra); r.entra += f.llevar; r.espacios.push(f.e); }
             });
-            return Object.values(por).sort((x, y) => String(x.familia).localeCompare(String(y.familia)) || String(x.nombre).localeCompare(String(y.nombre)));
+            filas.forEach(f => {
+                if (f.retirar && por[f.sku] && !(f.dias !== null && f.dias < 0)) por[f.sku].reusa += f.retirar;
+            });
+            return Object.values(por)
+                .map(r => ({ ...r, reusa: Math.min(r.reusa, r.entra), llevar: Math.max(0, r.entra - r.reusa) }))
+                .sort((x, y) => String(x.familia).localeCompare(String(y.familia)) || String(x.nombre).localeCompare(String(y.nombre)));
         }
 
         function repoMaquinaActual() {
@@ -1792,6 +1825,8 @@
             state.repoMaquina = String(id);
             state.repoDraft = repoCargarBorrador(id);
             state.repoError = '';
+            state.repoBodegaRepId = '';
+            state.repoBodegaError = '';
             render();
         };
 
@@ -1799,13 +1834,32 @@
             const d = state.repoDraft;
             if (!d) return;
             const o = d.filas[espacio] = d.filas[espacio] || {};
-            if (campo === 'listo') {
-                o.listo = !!valor;
+            if (campo === 'listo' || campo === 'cambiando') {
+                o[campo] = !!valor;
             } else {
                 const txt = String(valor).trim();
-                const n = parseInt(txt, 10);
+                const n = parseInt(txt.replace(/\./g, ''), 10);
                 if (txt === '' || isNaN(n)) delete o[campo];
                 else o[campo] = Math.max(0, n);
+            }
+            state.repoError = '';
+            repoRespaldar();
+            render();
+        };
+
+        // Cambiar el producto de un espacio durante la reposición ('' = deshacer el cambio)
+        window.repoSetProducto = function(espacio, sku) {
+            const d = state.repoDraft;
+            if (!d) return;
+            const o = d.filas[espacio] = d.filas[espacio] || {};
+            const asig = state.asignaciones.find(a => String(a.maquina_id) === String(d.maquinaId) && normEspacio(a.espacio) === String(espacio));
+            delete o.final;        // el "Dejé" sugerido cambia con el producto
+            delete o.precioNuevo;  // se sugiere el precio de referencia del producto nuevo
+            if (!sku || (asig && String(asig.sku) === String(sku))) {
+                delete o.skuNuevo;
+                o.cambiando = false;
+            } else {
+                o.skuNuevo = String(sku);
             }
             state.repoError = '';
             repoRespaldar();
@@ -1855,44 +1909,63 @@
             else if (!state.demoMode && !state.reposicionesOk) state.repoError = 'Falta crear la tabla de reposiciones en Supabase (reposiciones_v1.sql).';
             const filas = state.repoError ? [] : repoFilas(maquina, d);
             if (!state.repoError && !filas.length) state.repoError = 'Esta máquina no tiene espacios asignados.';
+            const sinPrecio = filas.filter(f => f.cambio && !(f.precioNuevo > 0));
+            if (!state.repoError && sinPrecio.length) state.repoError = `Indica el precio del producto nuevo en el espacio ${sinPrecio.map(f => f.e).join(', ')}.`;
+            const sinBodega = filas.filter(f => f.cambio && !f.prodNuevo);
+            if (!state.repoError && sinBodega.length) state.repoError = `El producto nuevo del espacio ${sinBodega.map(f => f.e).join(', ')} no está en la bodega.`;
             if (state.repoError) { render(); return; }
 
             const llevar = filas.reduce((t, f) => t + f.llevar, 0);
             const retirar = filas.reduce((t, f) => t + f.retirar, 0);
             const dif = filas.reduce((t, f) => t + f.diferencia, 0);
             const pendientes = filas.filter(f => !f.listo).length;
+            const cambios = filas.filter(f => f.cambio);
             const msg = `Guardar reposición de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
-                + `• Repuestas: ${llevar} u · Retiradas: ${retirar} u\n`
+                + `• Entran: ${llevar} u · Salen: ${retirar} u\n`
                 + `• Diferencia contra lo esperado: ${dif > 0 ? '+' : ''}${dif} u\n`
+                + (cambios.length ? `• Cambios de producto:\n${cambios.map(f => `   ${f.e}: ${f.nombre} → ${f.nombreNuevo} a $${clp(f.precioNuevo)}`).join('\n')}\n  Recuerda cambiar también el precio en la máquina.\n` : '')
                 + (pendientes ? `• ${pendientes} espacio(s) sin marcar como revisado (se guardan con los valores sugeridos)\n` : '')
-                + `\nLa cantidad de cada espacio pasará a ser lo anotado en "Dejé" y esta hora será el nuevo conteo base de toda la máquina. La bodega no se modifica.`;
+                + `\nLa cantidad de cada espacio pasará a ser lo anotado en "Dejé" y esta hora será el nuevo conteo base de toda la máquina. Después podrás actualizar la bodega.`;
             if (!confirm(msg)) return;
 
-            const detalle = filas.map(f => ({
-                asignacion_id: String(f.a.id), espacio: f.e, sku: f.sku,
-                base_anterior: f.base || null, cargado_anterior: f.cargado,
-                encontrado: f.encontrado, final: f.final
-            }));
+            const detalle = filas.map(f => {
+                const x = {
+                    asignacion_id: String(f.a.id), espacio: f.e, sku: f.sku,
+                    base_anterior: f.base || null, cargado_anterior: f.cargado,
+                    encontrado: f.encontrado, final: f.final
+                };
+                if (f.cambio) { x.sku_nuevo = f.skuNuevo; x.precio_anterior = f.precioActual; x.precio_nuevo = f.precioNuevo; }
+                return x;
+            });
 
             state.repoGuardando = true;
             render();
             try {
+                let nuevoId;
                 if (state.demoMode) {
-                    state.reposiciones.unshift({ id: 'demo-rep-' + Date.now(), maquina_id: maquina.id, fecha_hora_local: fecha, detalle, notas: d.notas, usuario: state.currentUser || 'demo', created_at: new Date().toISOString() });
-                    detalle.forEach(x => { const a = state.asignaciones.find(a => String(a.id) === x.asignacion_id); if (a) a.cantidad_asignada = x.final; });
+                    nuevoId = 'demo-rep-' + Date.now();
+                    state.reposiciones.unshift({ id: nuevoId, maquina_id: maquina.id, fecha_hora_local: fecha, detalle, notas: d.notas, usuario: state.currentUser || 'demo', created_at: new Date().toISOString(), bodega_aplicada_at: null });
+                    detalle.forEach(x => {
+                        const a = state.asignaciones.find(a => String(a.id) === x.asignacion_id);
+                        if (!a) return;
+                        a.cantidad_asignada = x.final;
+                        if (x.sku_nuevo) { a.sku = x.sku_nuevo; a.precio_venta_espacio = x.precio_nuevo; }
+                    });
                 } else {
                     if (typeof supabaseClient.rpc !== 'function') throw new Error('Supabase no disponible (sin conexión)');
-                    const { error } = await supabaseClient.rpc('registrar_reposicion', {
+                    const { data, error } = await supabaseClient.rpc('registrar_reposicion', {
                         p_maquina_id: String(maquina.id), p_fecha_hora_local: fecha, p_detalle: detalle,
                         p_notas: d.notas || null, p_usuario: state.currentUser || null
                     });
                     if (error) throw error;
+                    nuevoId = data;
                 }
-                guardarHistorial('REPOSICION', `${maquina.nombre} ${fmtBase(fecha)}: +${llevar} u repuestas, ${retirar} retiradas, diferencia ${dif > 0 ? '+' : ''}${dif} u en ${filas.length} espacios`);
+                guardarHistorial('REPOSICION', `${maquina.nombre} ${fmtBase(fecha)}: entran ${llevar} u, salen ${retirar} u, diferencia ${dif > 0 ? '+' : ''}${dif} u en ${filas.length} espacios${cambios.length ? ` · cambios: ${cambios.map(f => `${f.e} ${f.sku}→${f.skuNuevo}`).join(', ')}` : ''}`);
                 try { localStorage.removeItem(repoClave(maquina.id)); } catch (e) {}
                 if (!state.demoMode) await Promise.all([fetchAsignaciones(), fetchReposiciones()]);
                 state.repoDraft = repoNuevoBorrador(maquina.id);
-                alert('✅ Reposición guardada. El stock de la máquina parte de nuevo desde esta hora.');
+                state.repoBodegaRepId = nuevoId ? String(nuevoId) : '';
+                alert('✅ Reposición guardada. El stock de la máquina parte de nuevo desde esta hora.\n\nAbajo puedes actualizar la bodega con lo que entró y salió de la máquina.');
             } catch (err) {
                 console.error('Error guardando reposición:', err);
                 state.repoError = 'No se pudo guardar: ' + (err && err.message ? err.message : 'error desconocido') + '. Lo anotado sigue en este borrador.';
@@ -1902,6 +1975,141 @@
             }
         };
 
+        // ============================================
+        // BODEGA DESPUÉS DE LA REPOSICIÓN (v8). Solo se mueve cuando el usuario aprieta "Actualizar bodega".
+        //   Entra a la máquina  → se resta de la bodega (Dejé − Encontré, o todo lo dejado si cambió el producto)
+        //   Sale de la máquina  → se suma a la bodega solo si se marca "vuelve a bodega" (no vencido)
+        //   Lo que se sacó de más y volvió sin usarse nunca se descontó: no hay nada que devolver.
+        // El cálculo es el mismo que hace la función aplicar_bodega_reposicion en Supabase.
+        // ============================================
+        function repoMovimientosBase(rep) {
+            const por = {};
+            const fila = sku => por[sku] = por[sku] || { sku, entra: 0, sale: 0 };
+            (Array.isArray(rep.detalle) ? rep.detalle : []).forEach(x => {
+                const enc = Number(x.encontrado) || 0, fin = Number(x.final) || 0;
+                const cambio = x.sku_nuevo && String(x.sku_nuevo) !== String(x.sku);
+                if (cambio) {
+                    if (fin) fila(String(x.sku_nuevo)).entra += fin;
+                    if (enc) fila(String(x.sku)).sale += enc;
+                } else if (fin > enc) fila(String(x.sku)).entra += fin - enc;
+                else if (enc > fin) fila(String(x.sku)).sale += enc - fin;
+            });
+            return Object.values(por).filter(m => m.entra || m.sale);
+        }
+
+        function repoDevuelveDefecto(sku) {
+            const p = state.inventario.find(p => String(p.sku) === String(sku));
+            const dias = p ? diasParaVencer(p.fecha_caducidad) : null;
+            return !(dias !== null && dias < 0);   // vencido → se bota, no vuelve
+        }
+
+        function repoMovimientos(rep) {
+            const elec = (state.repoDevuelve && state.repoDevuelve[rep.id]) || {};
+            return repoMovimientosBase(rep).map(m => {
+                const p = state.inventario.find(p => String(p.sku) === String(m.sku)) || null;
+                const vuelve = m.sale ? (m.sku in elec ? !!elec[m.sku] : repoDevuelveDefecto(m.sku)) : false;
+                const delta = (vuelve ? m.sale : 0) - m.entra;
+                const bodega = p ? (Number(p.cantidad_actual) || 0) : 0;
+                return { ...m, nombre: p ? p.nombre_producto : m.sku, existe: !!p, vuelve, delta, bodega, despues: bodega + delta,
+                    vencido: p ? (diasParaVencer(p.fecha_caducidad) ?? 1) < 0 : false };
+            }).sort((x, y) => String(x.nombre).localeCompare(String(y.nombre)));
+        }
+
+        window.repoVerBodega = function(repId) {
+            state.repoBodegaRepId = String(repId);
+            state.repoBodegaError = '';
+            render();
+            try { document.getElementById('repoBodegaCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {}
+        };
+
+        window.repoDevuelve = function(repId, sku, valor) {
+            state.repoDevuelve = state.repoDevuelve || {};
+            const e = state.repoDevuelve[repId] = state.repoDevuelve[repId] || {};
+            e[sku] = !!valor;
+            state.repoBodegaError = '';
+            render();
+        };
+
+        window.repoAplicarBodega = async function(repId) {
+            const rep = state.reposiciones.find(r => String(r.id) === String(repId));
+            if (!rep || state.repoBodegaGuardando) return;
+            state.repoBodegaError = '';
+            if (rep.bodega_aplicada_at) { state.repoBodegaError = 'La bodega de esta reposición ya se actualizó.'; render(); return; }
+            const movs = repoMovimientos(rep);
+            const negativos = movs.filter(m => m.despues < 0);
+            if (negativos.length) {
+                state.repoBodegaError = `La bodega quedaría negativa en: ${negativos.map(m => `${m.nombre} (${m.despues})`).join(', ')}. Revisa el stock de bodega en Inventario o lo anotado en la reposición.`;
+                render(); return;
+            }
+            const cambian = movs.filter(m => m.delta !== 0);
+            const msg = `Actualizar bodega (reposición ${fmtBase(rep.fecha_hora_local)})\n\n`
+                + (cambian.length ? cambian.map(m => `• ${m.nombre}: ${m.bodega} → ${m.despues} (${m.delta > 0 ? '+' : ''}${m.delta})`).join('\n') : 'No cambia ninguna cantidad.')
+                + `\n\nEsto se hace una sola vez por reposición.`;
+            if (!confirm(msg)) return;
+            const devuelve = movs.filter(m => m.vuelve).map(m => m.sku);
+
+            state.repoBodegaGuardando = true;
+            render();
+            try {
+                if (state.demoMode) {
+                    movs.forEach(m => { const p = state.inventario.find(p => String(p.sku) === String(m.sku)); if (p) p.cantidad_actual = (Number(p.cantidad_actual) || 0) + m.delta; });
+                    rep.bodega_aplicada_at = new Date().toISOString();
+                    rep.bodega_movimientos = movs.map(m => ({ sku: m.sku, entra: m.entra, sale: m.sale, devuelto: m.vuelve ? m.sale : 0, delta: m.delta }));
+                } else {
+                    if (typeof supabaseClient.rpc !== 'function') throw new Error('Supabase no disponible (sin conexión)');
+                    const { error } = await supabaseClient.rpc('aplicar_bodega_reposicion', {
+                        p_reposicion_id: String(rep.id), p_devuelve: devuelve, p_usuario: state.currentUser || null
+                    });
+                    if (error) throw error;
+                }
+                const maq = state.maquinas.find(m => String(m.id) === String(rep.maquina_id));
+                guardarHistorial('BODEGA_REPOSICION', `${maq ? maq.nombre : rep.maquina_id} ${fmtBase(rep.fecha_hora_local)}: ${cambian.map(m => `${m.sku} ${m.delta > 0 ? '+' : ''}${m.delta}`).join(', ') || 'sin cambios'}`);
+                if (!state.demoMode) await Promise.all([fetchInventario(), fetchReposiciones()]);
+                state.repoBodegaRepId = '';
+                alert('✅ Bodega actualizada.');
+            } catch (err) {
+                console.error('Error actualizando bodega:', err);
+                state.repoBodegaError = 'No se pudo actualizar la bodega: ' + (err && err.message ? err.message : 'error desconocido');
+            } finally {
+                state.repoBodegaGuardando = false;
+                render();
+            }
+        };
+
+        function renderBodegaReposicion(rep) {
+            const movs = repoMovimientos(rep);
+            const aplicada = !!rep.bodega_aplicada_at;
+            return `
+                <div id="repoBodegaCard" class="bg-white p-4 sm:p-6 rounded-lg shadow border-2 ${aplicada ? 'border-transparent' : 'border-blue-300'}">
+                    <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                        <h3 class="font-bold text-lg">4. Actualizar bodega</h3>
+                        <span class="text-sm text-gray-600">Reposición ${fmtBase(rep.fecha_hora_local)}</span>
+                    </div>
+                    <p class="text-xs text-gray-500 mb-3">Se resta lo que <strong>entró</strong> a la máquina. Lo que sacaste de más y trajiste de vuelta nunca se descontó, así que no hay que devolverlo. Lo que <strong>salió</strong> de la máquina se suma solo si vuelve a la bodega (los vencidos vienen desmarcados).</p>
+                    ${movs.length ? `
+                        <table class="tabla-resp w-full text-sm">
+                            <thead><tr class="text-left text-xs uppercase text-gray-500 border-b"><th class="py-2">Producto</th><th class="py-2 text-right">Entró</th><th class="py-2 text-right">Salió</th><th class="py-2">¿Vuelve a bodega?</th><th class="py-2 text-right">Bodega</th></tr></thead>
+                            <tbody>
+                                ${movs.map(m => `
+                                    <tr class="border-b">
+                                        <td class="py-2 font-semibold">${esc(m.nombre)}${m.vencido ? ' <span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">vencido</span>' : ''}</td>
+                                        <td class="py-2 text-right tabular-nums">${m.entra ? `−${m.entra}` : '—'}</td>
+                                        <td class="py-2 text-right tabular-nums">${m.sale || '—'}</td>
+                                        <td class="py-2">${m.sale ? (aplicada ? (m.vuelve ? 'Sí' : 'No') : `<label class="inline-flex items-center gap-2"><input type="checkbox" id="repoDev-${esc(rep.id)}-${esc(m.sku)}" ${m.vuelve ? 'checked' : ''} onchange="window.repoDevuelve(${esc(JSON.stringify(String(rep.id)))}, ${esc(JSON.stringify(m.sku))}, this.checked)" class="w-5 h-5"> ${m.vuelve ? `+${m.sale}` : 'se bota'}</label>`) : '—'}</td>
+                                        <td class="py-2 text-right tabular-nums ${m.despues < 0 ? 'text-red-700 font-bold' : ''}">${aplicada ? '' : `${m.bodega} → `}<strong>${aplicada ? m.bodega : m.despues}</strong></td>
+                                    </tr>`).join('')}
+                            </tbody>
+                        </table>` : '<p class="text-sm text-gray-500">En esta reposición no entró ni salió nada de la máquina.</p>'}
+                    ${state.repoBodegaError ? `<div class="mt-3 p-3 bg-red-50 border border-red-300 rounded text-sm text-red-800" role="alert">${esc(state.repoBodegaError)}</div>` : ''}
+                    ${aplicada
+                        ? `<p class="mt-3 text-sm text-green-800 font-semibold">✓ Bodega actualizada el ${new Date(rep.bodega_aplicada_at).toLocaleString('es-CL')}.</p>`
+                        : `<div class="mt-3 flex flex-wrap gap-2">
+                               <button onclick="window.repoAplicarBodega(${esc(JSON.stringify(String(rep.id)))})" ${state.repoBodegaGuardando || !movs.length ? 'disabled' : ''} class="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold disabled:opacity-60">${state.repoBodegaGuardando ? 'Actualizando…' : 'Actualizar bodega'}</button>
+                           </div>
+                           <p class="text-xs text-gray-500 mt-2">Se hace una sola vez por reposición. Si prefieres corregir la bodega a mano, puedes dejarlo pendiente.</p>`}
+                </div>`;
+        }
+
         // Diferencias de una reposición ya guardada. Se recalcula con las ventas importadas hoy,
         // así que si se importan ventas atrasadas la diferencia se corrige sola.
         function repoResumenGuardada(maquina, rep) {
@@ -1909,6 +2117,7 @@
             const bases = {};
             det.forEach(x => { bases[normEspacio(x.espacio)] = x.base_anterior || null; });
             const vend = unidadesVendidasEntre(maquina, e => bases[e], rep.fecha_hora_local);
+            const nombreDe = sku => { const p = state.inventario.find(p => String(p.sku) === String(sku)); return p ? p.nombre_producto : sku; };
             const filas = det.map(x => {
                 const e = normEspacio(x.espacio);
                 const prod = state.inventario.find(p => String(p.sku) === String(x.sku)) || null;
@@ -1916,8 +2125,10 @@
                 const esperado = x.base_anterior ? Math.max(0, cargado - (vend[e] || 0)) : cargado;
                 const encontrado = Number(x.encontrado) || 0;
                 const fin = Number(x.final) || 0;
-                return { e, nombre: prod ? prod.nombre_producto : x.sku, esperado, encontrado, final: fin,
-                    diferencia: encontrado - esperado, llevar: Math.max(0, fin - encontrado), retirar: Math.max(0, encontrado - fin),
+                const cambio = !!(x.sku_nuevo && String(x.sku_nuevo) !== String(x.sku));
+                return { e, nombre: nombreDe(x.sku), cambio, nombreNuevo: cambio ? nombreDe(x.sku_nuevo) : '', esperado, encontrado, final: fin,
+                    diferencia: encontrado - esperado,
+                    llevar: cambio ? fin : Math.max(0, fin - encontrado), retirar: cambio ? encontrado : Math.max(0, encontrado - fin),
                     costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0 };
             });
             const faltan = filas.filter(f => f.diferencia < 0);
@@ -1929,7 +2140,8 @@
                 faltanU: -faltan.reduce((t, f) => t + f.diferencia, 0),
                 sobranU: sobran.reduce((t, f) => t + f.diferencia, 0),
                 faltanCosto: -faltan.reduce((t, f) => t + f.diferencia * f.costo, 0),
-                conDiferencia: filas.filter(f => f.diferencia !== 0)
+                conDiferencia: filas.filter(f => f.diferencia !== 0),
+                cambios: filas.filter(f => f.cambio)
             };
         }
 
@@ -1959,6 +2171,7 @@
             const ventasAtrasadas = RE_FECHA_MIN.test(d.fecha || '') && (!ultimaVenta || String(ultimaVenta).replace(' ', 'T').substring(0, 16) < d.fecha);
             const totLlevar = filas.reduce((t, f) => t + f.llevar, 0);
             const totRetirar = filas.reduce((t, f) => t + f.retirar, 0);
+            const totSacar = sacar.reduce((t, s) => t + s.llevar, 0);
             const totDif = filas.reduce((t, f) => t + f.diferencia, 0);
             const faltanCosto = -filas.filter(f => f.diferencia < 0).reduce((t, f) => t + f.diferencia * f.costo, 0);
             const revisados = filas.filter(f => f.listo).length;
@@ -1966,6 +2179,9 @@
             const chipDif = n => n === 0 ? '' : `<span class="text-xs font-bold px-2 py-0.5 rounded-full ${n < 0 ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800'}">${n < 0 ? `faltan ${-n}` : `sobran ${n}`}</span>`;
             const chipVence = dias => dias === null || dias > VENCE_AMARILLO ? '' : `<span class="text-xs font-bold px-2 py-0.5 rounded-full ${dias <= VENCE_ROJO ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${textoDiasVencer(dias)}</span>`;
             const historial = state.reposiciones.filter(r => String(r.maquina_id) === String(maquina.id)).slice(0, 10);
+            const repBodega = historial.find(r => String(r.id) === String(state.repoBodegaRepId))
+                || historial.find(r => !r.bodega_aplicada_at && repoMovimientosBase(r).length);
+            const opcionesProducto = [...state.inventario].sort((x, y) => String(x.nombre_producto).localeCompare(String(y.nombre_producto)));
 
             return `
                 <div class="space-y-6">
@@ -1981,6 +2197,8 @@
                         <div class="p-4 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-900">
                             ⚠️ Falta crear la tabla de reposiciones en Supabase (archivo <strong>reposiciones_v1.sql</strong>). Puedes usar la hoja de ruta, pero todavía no se puede guardar.
                         </div>` : ''}
+
+                    ${repBodega && !repBodega.bodega_aplicada_at ? renderBodegaReposicion(repBodega) : ''}
 
                     <div class="bg-white p-4 sm:p-6 rounded-lg shadow space-y-4">
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2004,23 +2222,23 @@
                     <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
                         <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
                             <h3 class="font-bold text-lg">1. Sacar de bodega</h3>
-                            <span class="text-sm text-gray-600">${totLlevar} unidades · ${sacar.length} productos</span>
+                            <span class="text-sm text-gray-600">${totSacar} unidades · ${sacar.filter(s => s.llevar).length} productos</span>
                         </div>
                         ${sacar.length ? `
                             <table class="tabla-resp w-full text-sm">
-                                <thead><tr class="text-left text-xs uppercase text-gray-500 border-b"><th class="py-2 w-10">Listo</th><th class="py-2">Producto</th><th class="py-2">Espacios</th><th class="py-2 text-right">Llevar</th><th class="py-2 text-right">Bodega</th></tr></thead>
+                                <thead><tr class="text-left text-xs uppercase text-gray-500 border-b"><th class="py-2 w-10">Listo</th><th class="py-2">Producto</th><th class="py-2">Espacios</th><th class="py-2 text-right">Sacar</th><th class="py-2 text-right">Bodega</th></tr></thead>
                                 <tbody>
                                     ${sacar.map(s => `
-                                        <tr class="border-b ${d.sacado[s.sku] ? 'opacity-50' : ''}">
+                                        <tr class="border-b ${d.sacado[s.sku] || !s.llevar ? 'opacity-50' : ''}">
                                             <td class="py-2"><input type="checkbox" id="repoSac-${esc(s.sku)}" ${d.sacado[s.sku] ? 'checked' : ''} onchange="window.repoSacado(${esc(JSON.stringify(s.sku))}, this.checked)" class="w-5 h-5"></td>
-                                            <td class="py-2 font-semibold">${esc(s.nombre)}</td>
+                                            <td class="py-2 font-semibold">${esc(s.nombre)}${s.reusa ? `<div class="text-xs font-normal text-gray-600">${s.reusa} se reutilizan de otro espacio</div>` : ''}</td>
                                             <td class="py-2 text-gray-600">${s.espacios.map(esc).join(', ')}</td>
                                             <td class="py-2 text-right font-bold tabular-nums">${s.llevar}</td>
                                             <td class="py-2 text-right tabular-nums ${s.bodega < s.llevar ? 'text-red-700 font-bold' : ''}">${s.bodega}${s.bodega < s.llevar ? ' ⚠️' : ''}</td>
                                         </tr>`).join('')}
                                 </tbody>
                             </table>
-                            <p class="text-xs text-gray-500 mt-2">Llevar = lo que dejarás − lo que hay. Bodega en rojo: no alcanza. La bodega no se descuenta sola; actualízala como siempre.</p>
+                            <p class="text-xs text-gray-500 mt-2">Sacar = lo que dejarás − lo que hay. Puedes llevar de más: la bodega solo se descuenta con lo que realmente entra a la máquina (paso 4).</p>
                         ` : `<p class="text-sm text-gray-500">✓ No hace falta llevar nada con los valores actuales.</p>`}
                         ${sinCap ? `<p class="text-xs text-amber-700 mt-2">${sinCap} espacio${sinCap === 1 ? '' : 's'} sin capacidad cargada: se sugiere llenar hasta la última cantidad cargada. Configura las capacidades en Máquinas → Editar.</p>` : ''}
                     </div>
@@ -2030,20 +2248,40 @@
                             <h3 class="font-bold text-lg">2. En la máquina</h3>
                             <span class="text-sm text-gray-600">${revisados} de ${filas.length} espacios revisados</span>
                         </div>
-                        <p class="text-xs text-gray-500 mb-4">Anota cuánto <strong>encontraste</strong> al abrir y cuánto <strong>dejaste</strong>. Vienen sugeridos con lo esperado y la capacidad; cambia solo lo que no calce.</p>
+                        <p class="text-xs text-gray-500 mb-4">Anota cuánto <strong>encontraste</strong> al abrir y cuánto <strong>dejaste</strong>. Vienen sugeridos con lo esperado y la capacidad; cambia solo lo que no calce. Para poner otro producto en un espacio usa <strong>Cambiar producto</strong>.</p>
                         <div class="divide-y">
                             ${filas.map(f => `
-                                <div class="py-3 grid grid-cols-[auto_1fr] sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-2 items-center ${f.listo ? 'opacity-60' : ''}">
+                                <div class="py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[auto_minmax(0,1fr)_auto] gap-x-3 gap-y-2 items-center ${f.listo ? 'opacity-60' : ''}">
                                     <input type="checkbox" id="repoListo-${f.e}" ${f.listo ? 'checked' : ''} onchange="window.repoSet('${f.e}', 'listo', this.checked)" class="w-5 h-5" aria-label="Espacio ${f.e} revisado">
                                     <div class="min-w-0">
-                                        <div class="font-semibold text-sm"><span class="font-mono text-gray-500">${f.e}</span> <span class="text-xs text-gray-400">${bandejaPos(f.e)}</span> · ${esc(f.nombre)}</div>
+                                        <div class="font-semibold text-sm"><span class="font-mono text-gray-500">${f.e}</span> <span class="text-xs text-gray-400">${bandejaPos(f.e)}</span> · ${f.cambio ? `<span class="line-through text-gray-500">${esc(f.nombre)}</span> → <span class="text-blue-800">${esc(f.nombreNuevo)}</span>` : esc(f.nombre)}</div>
                                         <div class="text-xs text-gray-600 flex flex-wrap gap-x-2 gap-y-1 items-center mt-0.5">
                                             <span>Esperado <strong>${f.esperado}</strong>${f.base ? ` (cargado ${f.cargado} − ${f.vendidas} vend.)` : ' (sin conteo base)'}</span>
                                             ${f.cap ? `<span>Cap. ${f.cap}</span>` : ''}
                                             ${chipDif(f.diferencia)}${chipVence(f.dias)}
-                                            ${f.llevar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">+${f.llevar}</span>` : ''}
-                                            ${f.retirar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-200 text-gray-800">retirar ${f.retirar}</span>` : ''}
+                                            ${f.cambio ? chipVence(f.diasEntra) : ''}
+                                            ${f.llevar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">entran ${f.llevar}</span>` : ''}
+                                            ${f.retirar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-200 text-gray-800">salen ${f.retirar}</span>` : ''}
+                                            <button type="button" onclick="window.repoSet('${f.e}', 'cambiando', ${f.abierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.cambio ? 'Editar cambio' : 'Cambiar producto'}</button>
                                         </div>
+                                        ${f.abierto || f.cambio ? `
+                                            <div class="mt-2 p-3 bg-blue-50 border border-blue-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
+                                                <label class="text-xs text-gray-700 font-semibold min-w-0">Producto nuevo
+                                                    <select id="repoProd-${f.e}" onchange="window.repoSetProducto('${f.e}', this.value)" class="block w-full max-w-full min-w-0 border p-2 rounded text-base font-normal bg-white">
+                                                        <option value="">— Mantener ${esc(f.nombre)} —</option>
+                                                        ${opcionesProducto.filter(p => String(p.sku) !== String(f.sku)).map(p => `<option value="${esc(p.sku)}" ${String(p.sku) === String(f.skuNuevo) ? 'selected' : ''}>${esc(p.nombre_producto)} · bodega ${Number(p.cantidad_actual) || 0}</option>`).join('')}
+                                                    </select>
+                                                </label>
+                                                ${f.cambio ? `
+                                                    <label class="text-xs text-gray-700 font-semibold">Precio en este espacio
+                                                        <input type="number" inputmode="numeric" min="0" step="10" id="repoPrecio-${f.e}" value="${f.precioNuevo || ''}" onchange="window.repoSet('${f.e}', 'precioNuevo', this.value)" class="block w-28 border p-2 rounded text-base font-normal tabular-nums">
+                                                    </label>
+                                                    <button type="button" onclick="window.repoSetProducto('${f.e}', '')" class="px-3 py-2 rounded border border-gray-300 text-sm font-semibold bg-white">Deshacer</button>
+                                                ` : ''}
+                                                <p class="text-xs text-gray-600 sm:col-span-3">${f.cambio
+                                                    ? `Precio anterior $${clp(f.precioActual)}. Encontré = unidades de ${esc(f.nombre)} que sacas; Dejé = unidades de ${esc(f.nombreNuevo)}. Cambia también el precio en la máquina.`
+                                                    : 'Elige el producto que quedará en este espacio.'}</p>
+                                            </div>` : ''}
                                     </div>
                                     <div class="col-start-2 sm:col-start-3 flex gap-2">
                                         <label class="text-xs text-gray-600 font-semibold">Encontré
@@ -2060,8 +2298,8 @@
                     <div class="bg-white p-4 sm:p-6 rounded-lg shadow space-y-3">
                         <h3 class="font-bold text-lg">3. Guardar</h3>
                         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                            <div class="p-3 bg-green-50 rounded"><div class="text-xs text-gray-600">Repuestas</div><div class="text-xl font-bold tabular-nums">${totLlevar} u</div></div>
-                            <div class="p-3 bg-gray-50 rounded"><div class="text-xs text-gray-600">Retiradas</div><div class="text-xl font-bold tabular-nums">${totRetirar} u</div></div>
+                            <div class="p-3 bg-green-50 rounded"><div class="text-xs text-gray-600">Entran a la máquina</div><div class="text-xl font-bold tabular-nums">${totLlevar} u</div></div>
+                            <div class="p-3 bg-gray-50 rounded"><div class="text-xs text-gray-600">Salen de la máquina</div><div class="text-xl font-bold tabular-nums">${totRetirar} u</div></div>
                             <div class="p-3 ${totDif < 0 ? 'bg-red-50' : 'bg-blue-50'} rounded"><div class="text-xs text-gray-600">Diferencia vs esperado</div><div class="text-xl font-bold tabular-nums">${totDif > 0 ? '+' : ''}${totDif} u</div></div>
                             <div class="p-3 bg-red-50 rounded"><div class="text-xs text-gray-600">Faltantes a costo</div><div class="text-xl font-bold tabular-nums">$${clp(faltanCosto)}</div></div>
                         </div>
@@ -2078,17 +2316,21 @@
                         <p class="text-xs text-gray-500 mb-3">Las diferencias se recalculan con las ventas importadas hasta hoy.</p>
                         ${historial.length ? `<div class="divide-y">${historial.map(r => {
                             const s = repoResumenGuardada(maquina, r);
+                            const pendiente = !r.bodega_aplicada_at && repoMovimientosBase(r).length;
                             return `
                                 <details class="py-3">
                                     <summary class="cursor-pointer flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
                                         <strong>${fmtBase(r.fecha_hora_local)}</strong>
-                                        <span class="text-gray-600">+${s.llevar} repuestas · ${s.retirar} retiradas</span>
+                                        <span class="text-gray-600">entran ${s.llevar} · salen ${s.retirar}</span>
                                         ${s.faltanU ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">faltan ${s.faltanU} ($${clp(s.faltanCosto)} a costo)</span>` : ''}
                                         ${s.sobranU ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">sobran ${s.sobranU}</span>` : ''}
                                         ${!s.faltanU && !s.sobranU ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">cuadra</span>' : ''}
+                                        ${s.cambios.length ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">${s.cambios.length} cambio${s.cambios.length === 1 ? '' : 's'} de producto</span>` : ''}
+                                        ${r.bodega_aplicada_at ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">bodega actualizada</span>' : pendiente ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">bodega pendiente</span>' : ''}
                                         <span class="text-xs text-gray-500">${esc(r.usuario || '')}</span>
                                     </summary>
                                     ${r.notas ? `<p class="text-sm text-gray-700 mt-2">📝 ${esc(r.notas)}</p>` : ''}
+                                    ${s.cambios.length ? `<p class="text-sm text-gray-700 mt-2">🔁 ${s.cambios.map(f => `${f.e}: ${esc(f.nombre)} → ${esc(f.nombreNuevo)}`).join(' · ')}</p>` : ''}
                                     ${s.conDiferencia.length ? `
                                         <div class="overflow-x-auto mt-2">
                                             <table class="w-full text-sm">
@@ -2096,6 +2338,7 @@
                                                 <tbody>${s.conDiferencia.map(f => `<tr class="border-b"><td class="py-1 font-mono">${f.e}</td><td class="py-1">${esc(f.nombre)}</td><td class="py-1 text-right tabular-nums">${f.esperado}</td><td class="py-1 text-right tabular-nums">${f.encontrado}</td><td class="py-1 text-right font-bold tabular-nums ${f.diferencia < 0 ? 'text-red-700' : 'text-blue-700'}">${f.diferencia > 0 ? '+' : ''}${f.diferencia}</td></tr>`).join('')}</tbody>
                                             </table>
                                         </div>` : '<p class="text-sm text-gray-500 mt-2">Todos los espacios cuadraron.</p>'}
+                                    ${pendiente ? `<button onclick="window.repoVerBodega(${esc(JSON.stringify(String(r.id)))})" class="mt-2 text-sm font-semibold text-blue-700 underline">Actualizar bodega de esta reposición</button>` : ''}
                                 </details>`;
                         }).join('')}</div>` : '<p class="text-sm text-gray-500">Todavía no hay reposiciones registradas para esta máquina.</p>'}
                     </div>
@@ -4386,7 +4629,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v7 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v8 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
