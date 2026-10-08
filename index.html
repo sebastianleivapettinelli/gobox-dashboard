@@ -88,6 +88,76 @@
         .alert-item { padding: 12px; border-left: 4px solid; border-radius: 4px; margin-bottom: 8px; }
         .alert-red { background: #fee2e2; border-color: #dc2626; }
         .alert-yellow { background: #fef3c7; border-color: #f59e0b; }
+        /* ===== Vista "máquina real" (v10, pestaña Espacios) ===== */
+        .vm-wrap { display: grid; grid-template-columns: minmax(0, 760px) 280px; gap: 20px; align-items: start; justify-content: start; }
+        @media (max-width: 900px) { .vm-wrap { grid-template-columns: minmax(0, 1fr); } }
+        .vm { background: linear-gradient(180deg, #2b3440 0%, #1c232c 100%); border-radius: 18px; padding: 10px; box-shadow: 0 24px 40px -18px rgba(10, 20, 30, .65), inset 0 1px 0 rgba(255,255,255,.08); max-width: 760px; }
+        .vm-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 8px 14px 12px; }
+        .vm-brand { font-family: 'Archivo Black', 'Arial Black', system-ui, sans-serif; font-weight: 900; font-size: 26px; letter-spacing: .02em; color: #fff; text-shadow: 0 0 12px rgba(96,165,250,.55); }
+        .vm-brand b { color: #60a5fa; }
+        .vm-sub { color: #9fb0c3; font-size: 11px; text-align: right; }
+        .vm-body { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 10px; }
+        .vm-glass { position: relative; border-radius: 10px; padding: 8px 8px 4px; background: #0d1319; box-shadow: inset 0 0 0 3px #3a4552, inset 0 0 30px rgba(0,0,0,.8); overflow: hidden; }
+        .vm-glass::before { content: ""; position: absolute; inset: 0; background: radial-gradient(120% 60% at 50% -10%, rgba(255,250,235,.22), transparent 60%); pointer-events: none; }
+        .vm-reflejo { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(115deg, transparent 0 18%, rgba(255,255,255,.07) 18% 24%, transparent 24% 62%, rgba(255,255,255,.05) 62% 65%, transparent 65%); }
+        .vm-tray { margin-bottom: 6px; }
+        .vm-slots { display: grid; gap: 4px; }
+        .vm-slot { position: relative; cursor: pointer; transition: opacity .2s, transform .15s; border-radius: 6px; }
+        .vm-slot:hover { transform: translateY(-1px); }
+        .vm-slot.dim { opacity: .22; }
+        .vm-slot.sel { box-shadow: 0 0 0 2px #fbbf24, 0 0 14px rgba(251,191,36,.6); }
+        .vm-cell { position: relative; height: 74px; overflow: hidden; }
+        .vm-coil { position: absolute; left: 6%; right: 6%; bottom: 2px; height: 14px; }
+        .vm-pk { position: absolute; left: 50%; bottom: 10px; transform-origin: 50% 100%; display: flex; align-items: center; justify-content: center; overflow: hidden; color: #fff; font: 800 9px/1.05 system-ui, sans-serif; text-align: center; text-transform: uppercase; letter-spacing: .02em; text-shadow: 0 1px 1px rgba(0,0,0,.45); padding: 0 2px; }
+        .vm-pk.lata { width: 44%; height: 54px; border-radius: 7px 7px 6px 6px; }
+        .vm-pk.lata::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 5px; background: linear-gradient(90deg, #8a939c, #e8edf1, #9aa3ac); }
+        .vm-pk.botella { width: 36%; height: 60px; border-radius: 40% 40% 7px 7px / 22% 22% 7px 7px; }
+        .vm-pk.botella::before { content: ""; position: absolute; top: 0; left: 34%; right: 34%; height: 6px; border-radius: 2px; background: #e9eef2; }
+        .vm-pk.bolsa { width: 82%; height: 56px; border-radius: 6px 6px 5px 5px; }
+        .vm-pk.bolsa::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 5px; background: repeating-linear-gradient(90deg, rgba(255,255,255,.55) 0 3px, rgba(0,0,0,.15) 3px 6px); }
+        .vm-pk.barra { width: 84%; height: 34px; border-radius: 4px; }
+        .vm-pk.caja { width: 70%; height: 46px; border-radius: 4px; }
+        .vm-pk .vm-txt { position: relative; z-index: 1; max-height: 3.2em; overflow: hidden; word-break: break-word; }
+        .vm-slots.angosta .vm-pk .vm-txt { font-size: 7px; word-break: normal; overflow-wrap: normal; }
+        .vm-pk.lata .vm-txt, .vm-pk.botella .vm-txt { writing-mode: vertical-rl; transform: rotate(180deg); max-height: 88%; max-width: none; white-space: nowrap; text-overflow: clip; font-size: 8px; }
+        .vm-tag { margin-top: 2px; padding: 1px 3px; border-radius: 3px; background: linear-gradient(180deg, #e9edf1, #c9d0d7); color: #1f2933; font: 700 10px/1.25 ui-monospace, 'SF Mono', Menlo, monospace; text-align: center; white-space: nowrap; overflow: hidden; }
+        .vm-tag .vm-l1 { display: flex; justify-content: space-between; gap: 2px; }
+        .vm-tag .vm-stk { font-weight: 600; color: #4b5563; }
+        .vm-tag .vm-pr { display: block; font-weight: 600; font-size: 9px; }
+        .vm-tag.bajo { background: linear-gradient(180deg, #fde68a, #f59e0b); }
+        .vm-tag.agotado { background: linear-gradient(180deg, #fca5a5, #dc2626); color: #fff; }
+        .vm-tag.agotado .vm-stk { color: #fff; }
+        .vm-shelf { height: 5px; margin-top: 3px; border-radius: 2px; background: linear-gradient(180deg, #5b6673, #2a323b); }
+        .vm-panel { display: flex; flex-direction: column; gap: 8px; background: linear-gradient(180deg, #343f4c, #262e38); border-radius: 10px; padding: 8px 7px; }
+        .vm-screen { background: #071a10; border-radius: 6px; padding: 6px 5px; min-height: 92px; color: #4ade80; font: 600 10px/1.35 ui-monospace, 'SF Mono', Menlo, monospace; text-shadow: 0 0 6px rgba(74,222,128,.55); box-shadow: inset 0 0 8px rgba(0,0,0,.8); word-break: break-word; }
+        .vm-screen .big { font-size: 15px; color: #a7f3d0; }
+        .vm-screen div { overflow-wrap: anywhere; word-break: normal; }
+        .vm-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+        .vm-keys span { background: linear-gradient(180deg, #e5e7eb, #9ca3af); color: #1f2937; border-radius: 4px; text-align: center; font: 700 10px/1 system-ui; padding: 5px 0; box-shadow: 0 2px 0 #4b5563; }
+        .vm-reader { border-radius: 8px; background: #111827; color: #93c5fd; text-align: center; padding: 8px 2px; font: 600 9px/1.3 system-ui; border: 1px solid #374151; }
+        .vm-reader i { display: block; font-style: normal; font-size: 16px; color: #60a5fa; }
+        .vm-bottom { padding: 10px 6px 4px; display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 10px; }
+        .vm-door { height: 34px; border-radius: 6px; background: linear-gradient(180deg, #0f151b, #1f2730); box-shadow: inset 0 2px 6px rgba(0,0,0,.9); color: #6b7a8a; font: 700 10px/34px system-ui; text-align: center; letter-spacing: .25em; }
+        .vm-foot { border-radius: 6px; background: #1a2129; }
+        @media (max-width: 640px) {
+            .vm-body, .vm-bottom { grid-template-columns: minmax(0, 1fr); }
+            .vm-panel { order: -1; flex-direction: row; align-items: stretch; padding: 6px; }
+            .vm-screen { flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; }
+            .vm-reader { width: 74px; flex-shrink: 0; padding: 4px 2px; }
+            .vm-foot { display: none; }
+            .vm-glass { padding: 6px 4px 3px; }
+            .vm-slots { gap: 2px; }
+            .vm-slots.angosta .vm-tag .vm-stk .vm-cap { display: none; }
+            .vm-keys { display: none; }
+            .vm-cell { height: 64px; }
+            .vm-pk.lata { height: 46px; } .vm-pk.botella { height: 52px; } .vm-pk.bolsa { height: 48px; } .vm-pk.barra { height: 30px; } .vm-pk.caja { height: 40px; }
+            .vm-pk { font-size: 8px; }
+            .vm-tag { font-size: 9px; padding: 1px 1px; }
+            .vm-tag .vm-pr { font-size: 8px; letter-spacing: -.02em; }
+            .vm-brand { font-size: 20px; }
+            .vm-screen { font-size: 8px; padding: 5px 3px; }
+            .vm-screen .big { font-size: 13px; }
+        }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -187,6 +257,10 @@
             repoBodegaError: '',
             compraDias: 14,          // cobertura de la sugerencia de compra (días)
             compraVerTodos: false,
+            vistaEspacios: 'maquina', // 'maquina' (vista real) o 'grilla' (edición clásica)
+            vmSel: null,
+            vmFamOff: [],
+            vmBajo: false,
             repoError: '',
             loading: true,
             showNewProductForm: false,
@@ -783,6 +857,7 @@
 
         window.selectMachineForAssignment = function(machineId) {
             state.selectedMachineForAssignment = machineId;
+            state.vmSel = null;
             render();
         };
 
@@ -2536,6 +2611,171 @@
         }
 
         // ============================================
+        // VISTA "MÁQUINA REAL" (v10, pestaña Espacios). Dibuja la máquina de frente con lo asignado en cada
+        // espacio: forma del envase según familia/nombre, hasta 3 unidades en fila según el stock estimado,
+        // espiral, etiqueta con número de espacio, precio y stock. Tocar un espacio muestra el detalle.
+        // ============================================
+        window.setVistaEspacios = function(v) { state.vistaEspacios = v; render(); };
+        window.vmElegir = function(espacio) { state.vmSel = state.vmSel === String(espacio) ? null : String(espacio); render(); };
+        window.vmToggleFam = function(f) {
+            const off = new Set(state.vmFamOff || []);
+            off.has(f) ? off.delete(f) : off.add(f);
+            state.vmFamOff = [...off];
+            render();
+        };
+        window.vmToggleBajo = function() { state.vmBajo = !state.vmBajo; render(); };
+
+        function vmHash(s) { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; }
+        const VM_COLORES = [
+            [/zero|monster/i, '#1b1b1f'], [/coca|cola/i, '#c8102e'], [/sprite/i, '#00a14b'], [/pepsi/i, '#0b4ea2'],
+            [/agua|benedictino|vital/i, '#7fc6e8'], [/lim[oó]n/i, '#e5c62b'], [/jugo|vivo/i, '#f28c28'], [/red ?bull/i, '#1f3a93'],
+            [/oreo/i, '#1d4f91'], [/milka/i, '#7d69ac'], [/kit ?kat/i, '#d6001c'], [/triton/i, '#6b3fa0'], [/tuareg/i, '#8b5a2b'],
+            [/chocman|brounichoc|braunichoc|negritos|rigochoc/i, '#5a3a22'], [/kryzpo/i, '#e2231a'], [/lays|papas/i, '#f6c400'],
+            [/rolls|man[ií]/i, '#b5651d'], [/gretel/i, '#c2185b'], [/barra|prote/i, '#263238'], [/extra ?life/i, '#00897b']
+        ];
+        const VM_PALETA_FAMILIA = {
+            Bebidas: ['#0b6fb8', '#d32f2f', '#2e7d32', '#ef6c00'], Snacks: ['#e65100', '#f9a825', '#c62828', '#6d4c41'],
+            Confites: ['#6d4c41', '#8e24aa', '#ad1457', '#4e342e'], Dulces: ['#1565c0', '#6a1b9a', '#00838f', '#c2185b'],
+            'Proteína': ['#37474f', '#00695c', '#4527a0', '#283593']
+        };
+        function vmColor(nombre, familia) {
+            for (const [re, c] of VM_COLORES) if (re.test(nombre)) return c;
+            const pal = VM_PALETA_FAMILIA[familia] || ['#546e7a', '#8d6e63', '#5c6bc0', '#26a69a'];
+            return pal[vmHash(nombre) % pal.length];
+        }
+        function vmForma(nombre, familia) {
+            if (/lata/i.test(nombre)) return 'lata';
+            if (/botella|agua|jugo|benedictino|vital/i.test(nombre)) return 'botella';
+            if (familia === 'Bebidas') return /monster|red ?bull|zero/i.test(nombre) ? 'lata' : 'botella';
+            if (familia === 'Snacks') return 'bolsa';
+            if (familia === 'Proteína' || /barra|kit ?kat|rolls|chocman|tuareg/i.test(nombre)) return 'barra';
+            return 'caja';
+        }
+        function vmCorto(nombre) {
+            return nombreBase(nombre).replace(/\(.*?\)/g, '').replace(/\b(botella|lata|sin gas|con gas|500 ?ml|\d+ ?gr?)\b/gi, '').trim().split(/\s+/).slice(0, 2).join(' ');
+        }
+        // Sombreado cilíndrico (latas/botellas) o de envoltorio (bolsas/barras)
+        function vmFondo(color, forma) {
+            if (forma === 'lata' || forma === 'botella') {
+                return `linear-gradient(90deg, rgba(0,0,0,.45), rgba(0,0,0,0) 22%, rgba(255,255,255,.35) 38%, rgba(255,255,255,0) 52%, rgba(0,0,0,.3)), ${color}`;
+            }
+            return `linear-gradient(180deg, rgba(255,255,255,.28), rgba(255,255,255,0) 35%, rgba(0,0,0,.25)), ${color}`;
+        }
+        function vmEspiral() {
+            const vueltas = 6;
+            return `<svg class="vm-coil" viewBox="0 0 ${vueltas * 10 + 4} 14" preserveAspectRatio="none" aria-hidden="true">${Array.from({ length: vueltas }, (_, i) => `<ellipse cx="${7 + i * 10}" cy="7" rx="5.2" ry="5.6" fill="none" stroke="#b8c2cc" stroke-width="1.3" opacity="${0.55 + 0.45 * (i / vueltas)}"/>`).join('')}</svg>`;
+        }
+
+        function vmDatos(maquina) {
+            const ventas = getConfigConteo(maquina) ? getVentasDesdeConteo(maquina) : {};
+            return state.asignaciones.filter(a => String(a.maquina_id) === String(maquina.id)).map(a => {
+                const e = normEspacio(a.espacio);
+                const n = parseInt(e, 10);
+                const p = state.inventario.find(x => String(x.sku) === String(a.sku)) || null;
+                const nombre = p ? p.nombre_producto : String(a.sku);
+                const familia = p ? (p.familia || '') : '';
+                const q = stockEstimadoEspacio(maquina, a, ventas);
+                const cap = capacidadEspacio(maquina, e) || Number(a.cantidad_asignada) || 0;
+                return {
+                    a, e, bandeja: Math.floor((n - 1) / POSICIONES_TCN) + 1, pos: ((n - 1) % POSICIONES_TCN) + 1,
+                    p, nombre, familia, q, cap, capConfigurada: !!capacidadEspacio(maquina, e),
+                    vendidas: (ventas[e] || {}).unidades || 0, precio: Number(a.precio_venta_espacio) || (p ? Number(p.precio_venta_unitario) || 0 : 0),
+                    dias: p ? diasParaVencer(p.fecha_caducidad) : null,
+                    color: vmColor(nombre, familia), forma: vmForma(nombre, familia)
+                };
+            });
+        }
+
+        function renderMaquinaReal(maquina) {
+            const datos = vmDatos(maquina);
+            const filas = maquina.total_filas || 6;
+            const famOff = new Set(state.vmFamOff || []);
+            const familias = [...new Set(datos.map(d => d.familia).filter(Boolean))].sort();
+            const sel = datos.find(d => d.e === state.vmSel) || null;
+            const cfg = getConfigConteo(maquina);
+            const base = maxBaseConfig(cfg);
+            const bajos = datos.filter(d => d.q <= 2).length;
+
+            const slot = (d, cols) => {
+                const dim = famOff.has(d.familia) || (state.vmBajo && d.q > 2);
+                const unidades = Math.min(3, d.q);
+                const pks = Array.from({ length: unidades }, (_, i) => unidades - 1 - i).map(i => {
+                    const esc1 = 1 - i * 0.1;
+                    return `<div class="vm-pk ${d.forma}" style="background:${vmFondo(d.color, d.forma)};transform:translateX(calc(-50% + ${i * 3}px)) translateY(${-i * 6}px) scale(${esc1});filter:brightness(${1 - i * 0.22});z-index:${10 - i}">${i === 0 ? `<span class="vm-txt">${esc(cols >= 8 && !['lata', 'botella'].includes(d.forma) ? vmCorto(d.nombre).split(' ')[0] : vmCorto(d.nombre))}</span>` : ''}</div>`;
+                }).join('');
+                const tagClase = d.q === 0 ? 'agotado' : d.q <= 2 ? 'bajo' : '';
+                return `
+                    <div class="vm-slot ${dim ? 'dim' : ''} ${sel && sel.e === d.e ? 'sel' : ''}" onclick="window.vmElegir('${d.e}')" role="button" tabindex="0" aria-label="Espacio ${d.e}: ${esc(d.nombre)}, quedan ${d.q}">
+                        <div class="vm-cell">${pks}${vmEspiral()}</div>
+                        <div class="vm-tag ${tagClase}"><div class="vm-l1"><span>${d.e}</span><span class="vm-stk">${d.q}<span class="vm-cap">${d.cap ? '/' + d.cap : ''}</span></span></div><span class="vm-pr">${d.q === 0 ? 'AGOTADO' : '$' + clp(d.precio)}</span></div>
+                    </div>`;
+            };
+
+            const bandejas = Array.from({ length: filas }, (_, i) => i + 1).map(b => {
+                const items = datos.filter(d => d.bandeja === b).sort((x, y) => x.pos - y.pos);
+                return `
+                    <div class="vm-tray">
+                        ${items.length
+                            ? `<div class="vm-slots ${items.length >= 8 ? 'angosta' : ''}" style="grid-template-columns:repeat(${Math.max(items.length, 3)}, minmax(0, 1fr))">${items.map(d => slot(d, items.length)).join('')}</div>`
+                            : `<div class="vm-cell" style="height:40px;display:flex;align-items:center;justify-content:center;color:#5b6673;font-size:11px">Bandeja ${b} sin productos</div>`}
+                        <div class="vm-shelf"></div>
+                    </div>`;
+            }).join('');
+
+            const pantalla = sel
+                ? `<div>N°</div><div class="big">${sel.e}</div><div>${esc(vmCorto(sel.nombre))}</div><div>$${clp(sel.precio)}</div><div>QUEDAN ${sel.q}</div>`
+                : `<div>GO BOX</div><div class="big">${datos.length}</div><div>ESPACIOS</div><div>${bajos} BAJO STOCK</div>`;
+
+            const detalle = sel ? `
+                <div class="bg-white rounded-lg shadow p-4 space-y-3">
+                    <div class="flex items-start gap-3">
+                        <div class="w-10 h-14 rounded flex-shrink-0" style="background:${vmFondo(sel.color, sel.forma)}"></div>
+                        <div class="min-w-0">
+                            <div class="font-bold leading-tight">${esc(sel.nombre)}</div>
+                            <div class="text-xs text-gray-500">${esc(sel.familia)} · ${esc(sel.a.sku)}</div>
+                            <div class="text-xs text-gray-500">Espacio ${sel.e} · bandeja ${sel.bandeja} · posición ${sel.pos}</div>
+                        </div>
+                    </div>
+                    <dl class="grid grid-cols-2 gap-x-3 gap-y-1 text-sm">
+                        <dt class="text-gray-500">Quedan (estimado)</dt><dd class="text-right font-bold ${sel.q <= 2 ? 'text-red-700' : ''}">${sel.q}${sel.cap ? ' de ' + sel.cap : ''}</dd>
+                        <dt class="text-gray-500">Cargado</dt><dd class="text-right">${Number(sel.a.cantidad_asignada) || 0}</dd>
+                        <dt class="text-gray-500">Vendidas desde ${base ? fmtBase(base) : 'el conteo'}</dt><dd class="text-right">${sel.vendidas}</dd>
+                        <dt class="text-gray-500">Faltan para llenar</dt><dd class="text-right">${sel.cap ? Math.max(0, sel.cap - sel.q) : '—'}${sel.capConfigurada ? '' : '<div class="text-xs text-gray-400">capacidad no configurada</div>'}</dd>
+                        <dt class="text-gray-500">Precio</dt><dd class="text-right">$${clp(sel.precio)}</dd>
+                        <dt class="text-gray-500">Vence</dt><dd class="text-right ${sel.dias !== null && sel.dias <= VENCE_AMARILLO ? 'text-amber-700 font-semibold' : ''}">${sel.dias === null ? 'sin fecha' : textoDiasVencer(sel.dias)}</dd>
+                        <dt class="text-gray-500">En bodega</dt><dd class="text-right">${sel.p ? Number(sel.p.cantidad_actual) || 0 : 0}</dd>
+                    </dl>
+                    <button onclick="window.openEditAssignmentModal('${esc(maquina.id)}', '${sel.e}')" class="w-full bg-blue-600 text-white py-2 rounded-lg font-semibold">Editar asignación</button>
+                </div>` : `
+                <div class="bg-white rounded-lg shadow p-4 text-sm text-gray-600">Toca un producto de la máquina para ver cuánto queda, lo vendido, el precio y el vencimiento.</div>`;
+
+            return `
+                <div class="space-y-4">
+                    <div class="flex flex-wrap items-center gap-2">
+                        ${familias.map(f => `<button onclick="window.vmToggleFam(${esc(JSON.stringify(f))})" class="px-3 py-1.5 rounded-full text-sm font-semibold border ${famOff.has(f) ? 'bg-white text-gray-400 border-gray-200 line-through' : 'bg-white text-gray-800 border-gray-300'}">${esc(f)}</button>`).join('')}
+                        <button onclick="window.vmToggleBajo()" class="px-3 py-1.5 rounded-full text-sm font-semibold border ${state.vmBajo ? 'bg-amber-100 text-amber-900 border-amber-300' : 'bg-white text-gray-800 border-gray-300'}">Solo bajo stock (${bajos})</button>
+                    </div>
+                    <div class="vm-wrap">
+                        <div class="vm" aria-label="Máquina ${esc(maquina.nombre)}">
+                            <div class="vm-top"><span class="vm-brand">GO<b>BOX</b></span><span class="vm-sub">${esc(maquina.nombre)}<br>${base ? 'stock desde ' + fmtBase(base) : ''}</span></div>
+                            <div class="vm-body">
+                                <div class="vm-glass">${bandejas}<div class="vm-reflejo"></div></div>
+                                <div class="vm-panel">
+                                    <div class="vm-screen">${pantalla}</div>
+                                    <div class="vm-keys">${['1','2','3','4','5','6','7','8','9','*','0','#'].map(k => `<span>${k}</span>`).join('')}</div>
+                                    <div class="vm-reader"><i>)))</i>TARJETA</div>
+                                </div>
+                            </div>
+                            <div class="vm-bottom"><div class="vm-door">EMPUJE</div><div class="vm-foot"></div></div>
+                        </div>
+                        <div class="space-y-3">${detalle}
+                            <p class="text-xs text-gray-500">Unidades dibujadas: hasta 3 por espacio. Etiqueta: espacio y quedan/capacidad arriba, precio abajo. Amarillo = 2 o menos; rojo = agotado.</p>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        // ============================================
         // PRÓXIMOS A VENCER (semáforo). Usa la fecha de caducidad de inventario_bodega (una fecha por producto).
         // Solo lista productos que tengan unidades (bodega + máquinas estimado). Umbrales en días:
         //   rojo: vencido o ≤ 7 · amarillo: ≤ 30 · verde: ≤ 60
@@ -4161,6 +4401,12 @@
                         </button>
                     </div>
 
+                    <div class="inline-flex rounded-lg border border-gray-300 overflow-hidden text-sm font-semibold">
+                        <button onclick="window.setVistaEspacios('maquina')" class="px-4 py-2 ${state.vistaEspacios !== 'grilla' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}">Vista máquina</button>
+                        <button onclick="window.setVistaEspacios('grilla')" class="px-4 py-2 ${state.vistaEspacios === 'grilla' ? 'bg-blue-600 text-white' : 'bg-white text-gray-700'}">Vista grilla</button>
+                    </div>
+
+                    ${state.vistaEspacios !== 'grilla' ? renderMaquinaReal(maquina) : `
                     <div class="bg-white p-6 rounded-lg shadow">
                         <h3 class="text-lg font-bold mb-4">🎯 Grid de Asignaciones (${filas} bandejas × ${columnas} posiciones)</h3>
                         <p class="text-sm text-gray-600 mb-3">Toca un espacio para asignar el producto, la cantidad y la capacidad</p>
@@ -4236,6 +4482,7 @@
                             </div>
                         ` : ''}
                     </div>
+                    `}
                 </div>
             `;
         }
@@ -4821,7 +5068,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v9 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v10 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
