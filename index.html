@@ -176,6 +176,12 @@
             asignaciones: [],
             maquinas: [],
             historial: [],
+            reposiciones: [],        // tabla reposiciones (ver reposiciones_v1.sql)
+            reposicionesOk: false,   // false si la tabla aún no existe en Supabase
+            repoMaquina: '',         // máquina elegida en la pestaña Reponer
+            repoDraft: null,         // reposición en curso (se respalda en este navegador)
+            repoGuardando: false,
+            repoError: '',
             loading: true,
             showNewProductForm: false,
             showAddMachineForm: false,
@@ -406,6 +412,8 @@
                 { id: 'a3', maquina_id: '6ba7b810-9dad-11d1-80b4-00c04fd430c8', espacio: '33', sku: 'SKU002', cantidad_asignada: 8, productos_por_slot: 1, precio_venta_espacio: 2200 }
             ];
             state.historial = [];
+            state.reposiciones = [];
+            state.reposicionesOk = true;
             console.log('✅ Datos de ejemplo cargados correctamente');
         }
 
@@ -433,7 +441,8 @@
                     fetchInventario(),
                     fetchAsignaciones(),
                     fetchMaquinas(),
-                    fetchHistorial()
+                    fetchHistorial(),
+                    fetchReposiciones()
                 ]);
                 // En producción NO se muestran datos inventados: si algo falla se avisa.
                 const fallidas = ['Ventas', 'Inventario', 'Asignaciones', 'Máquinas']
@@ -532,6 +541,20 @@
             return true;
         }
 
+        // Reposiciones registradas desde la pestaña Reponer. Si la tabla aún no existe (falta correr
+        // reposiciones_v1.sql) el dashboard sigue funcionando con CONTEO_BASE.
+        async function fetchReposiciones() {
+            const { data, error } = await supabaseClient
+                .from('reposiciones')
+                .select('id, maquina_id, fecha_hora_local, detalle, notas, usuario, created_at')
+                .order('fecha_hora_local', { ascending: false })
+                .limit(200);
+            if (error) { console.warn('Reposiciones no disponibles:', error.message); state.reposiciones = []; state.reposicionesOk = false; return false; }
+            state.reposiciones = data || [];
+            state.reposicionesOk = true;
+            return true;
+        }
+
         function guardarHistorial(accion, detalles) {
             const registro = {
                 timestamp: new Date().toISOString(),
@@ -558,6 +581,7 @@
 
         function limpiarDatos() {
             state.ventas = []; state.inventario = []; state.asignaciones = []; state.maquinas = []; state.historial = [];
+            state.reposiciones = []; state.reposicionesOk = false; state.repoMaquina = ''; state.repoDraft = null; state.repoError = '';
             state.selectedMachineForAssignment = null; state.editingMachine = null; state.editingProduct = null;
             state.showEditProductModal = false; state.showEditAssignmentModal = false; state.showScannerModal = false;
             state.showImportModal = false; state.importPreview = null;
@@ -1542,7 +1566,8 @@
         // CONTEO BASE DE STOCK (Asignaciones)
         // Stock estimado de un espacio = cantidad cargada − unidades vendidas DESPUÉS del conteo.
         // Las fechas/horas son hora de Chile. Una venta cuenta solo si ocurrió después del minuto indicado.
-        // Cuando hagas un nuevo conteo o reposición, actualiza aquí la hora y la cantidad en Asignaciones.
+        // Desde v7 las reposiciones se registran en la pestaña Reponer (tabla reposiciones) y su hora
+        // reemplaza a esta constante cuando es posterior. Ya no hace falta editar este bloque.
         //   bandejas: hora del conteo por bandeja (1 = espacios 1-10 … 6 = 51-60)
         //   todas:    hora única para toda la máquina (o para las bandejas no listadas)
         // El conteo por bandeja del jue 24-09 y la reposición del vie 25-09 19:06–19:10 en
@@ -1556,8 +1581,29 @@
             'edificio new': { todas: '2026-10-02T21:43' }   // nuevo layout (viernes 02-10-2026 21:43); reemplaza la fecha anterior (mié 23-09 20:30, por dictado)
         };
 
+        // Desde v7 la hora base sale de la última reposición registrada en la pestaña Reponer
+        // (tabla reposiciones). CONTEO_BASE queda solo como respaldo para lo anterior a eso.
+        function getUltimaReposicion(maquina) {
+            if (!maquina) return null;
+            let ult = null;
+            state.reposiciones.forEach(r => {
+                if (String(r.maquina_id) !== String(maquina.id)) return;
+                if (!ult || String(r.fecha_hora_local) > String(ult.fecha_hora_local)) ult = r;
+            });
+            return ult;
+        }
+
+        function maxBaseConfig(cfg) {
+            if (!cfg) return '';
+            return [cfg.todas, ...Object.values(cfg.bandejas || {})].filter(Boolean).sort().pop() || '';
+        }
+
         function getConfigConteo(maquina) {
-            return maquina ? (CONTEO_BASE[String(maquina.nombre || '').trim().toLowerCase()] || null) : null;
+            if (!maquina) return null;
+            const fijo = CONTEO_BASE[String(maquina.nombre || '').trim().toLowerCase()] || null;
+            const rep = getUltimaReposicion(maquina);
+            if (rep && String(rep.fecha_hora_local) > maxBaseConfig(fijo)) return { todas: rep.fecha_hora_local, reposicion: rep };
+            return fijo;
         }
 
         function getBaseConteo(maquina, espacio) {
@@ -1643,6 +1689,417 @@
             });
             filas.sort((x, y) => x.quedan - y.quedan || x.maquina.localeCompare(y.maquina) || Number(x.espacio) - Number(y.espacio));
             return filas;
+        }
+
+        // ============================================
+        // PESTAÑA REPONER (v7): hoja de ruta + registro de la reposición + diferencias (merma)
+        //  - Esperado de un espacio = cargado − ventas entre el conteo base y la hora de la reposición.
+        //  - Encontré = lo que había al abrir la máquina. Diferencia = encontré − esperado (negativo = faltan).
+        //  - Dejé = lo que quedó al cerrar. Pasa a ser la nueva cantidad_asignada y la hora de la
+        //    reposición pasa a ser el nuevo conteo base de TODA la máquina (función registrar_reposicion).
+        //  - La bodega NO se descuenta (regla vigente): la hoja de ruta solo muestra cuánto sacar.
+        //  - El borrador se respalda en este navegador para no perder lo anotado si se recarga la página.
+        // ============================================
+        const pad2 = n => String(n).padStart(2, '0');
+        function ahoraLocalMin() {
+            const d = new Date();
+            return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+        }
+        const RE_FECHA_MIN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+
+        // Unidades vendidas por espacio entre la base de cada espacio (excluye su minuto) y 'hasta' (incluye su minuto)
+        function unidadesVendidasEntre(maquina, baseDe, hasta) {
+            const res = {};
+            state.ventas.forEach(v => {
+                if (!esVentaValida(v)) return;
+                const m = getMaquinaDeVenta(v);
+                if (!m || String(m.id) !== String(maquina.id)) return;
+                const e = normEspacio(v.espacio);
+                if (!e) return;
+                const base = baseDe(e);
+                if (!base) return;
+                const ts = tsVenta(v);
+                if (!ts || ts <= base + ':59' || ts > hasta + ':59') return;
+                res[e] = (res[e] || 0) + unidadesDeVenta(v);
+            });
+            return res;
+        }
+
+        function repoClave(maquinaId) { return 'gobox_repo_borrador_' + maquinaId; }
+        function repoNuevoBorrador(maquinaId) { return { maquinaId: String(maquinaId), fecha: ahoraLocalMin(), notas: '', filas: {}, sacado: {} }; }
+        function repoCargarBorrador(maquinaId) {
+            try {
+                const d = JSON.parse(localStorage.getItem(repoClave(maquinaId)) || 'null');
+                if (d && String(d.maquinaId) === String(maquinaId) && d.filas) return d;
+            } catch (e) {}
+            return repoNuevoBorrador(maquinaId);
+        }
+        function repoRespaldar() {
+            const d = state.repoDraft;
+            if (!d) return;
+            try { localStorage.setItem(repoClave(d.maquinaId), JSON.stringify(d)); } catch (e) {}
+        }
+
+        function repoFilas(maquina, draft) {
+            const baseDe = e => getBaseConteo(maquina, e);
+            const fecha = RE_FECHA_MIN.test(draft.fecha || '') ? draft.fecha : ahoraLocalMin();
+            const vend = unidadesVendidasEntre(maquina, baseDe, fecha);
+            return state.asignaciones
+                .filter(a => String(a.maquina_id) === String(maquina.id))
+                .sort((x, y) => Number(normEspacio(x.espacio)) - Number(normEspacio(y.espacio)))
+                .map(a => {
+                    const e = normEspacio(a.espacio);
+                    const prod = state.inventario.find(p => String(p.sku) === String(a.sku)) || null;
+                    const cargado = Number(a.cantidad_asignada) || 0;
+                    const base = baseDe(e);
+                    const vendidas = vend[e] || 0;
+                    const esperado = base ? Math.max(0, cargado - vendidas) : cargado;
+                    const cap = capacidadEspacio(maquina, e);
+                    const objetivo = cap || cargado;
+                    const o = draft.filas[e] || {};
+                    const encontrado = Number.isInteger(o.encontrado) ? o.encontrado : esperado;
+                    const fin = Number.isInteger(o.final) ? o.final : Math.max(objetivo, encontrado);
+                    return {
+                        a, e, prod, sku: a.sku, nombre: prod ? prod.nombre_producto : `${a.sku} (no está en bodega)`,
+                        cargado, base, vendidas, esperado, cap, objetivo, encontrado, final: fin,
+                        diferencia: encontrado - esperado,
+                        llevar: Math.max(0, fin - encontrado),
+                        retirar: Math.max(0, encontrado - fin),
+                        listo: !!o.listo,
+                        costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0,
+                        dias: prod ? diasParaVencer(prod.fecha_caducidad) : null
+                    };
+                });
+        }
+
+        // Productos a sacar de bodega (suma de "llevar" por SKU)
+        function repoSacarBodega(filas) {
+            const por = {};
+            filas.forEach(f => {
+                if (!f.llevar) return;
+                const r = por[f.sku] = por[f.sku] || { sku: f.sku, nombre: f.nombre, familia: f.prod ? (f.prod.familia || '') : '', llevar: 0, espacios: [], bodega: f.prod ? (Number(f.prod.cantidad_actual) || 0) : 0 };
+                r.llevar += f.llevar;
+                r.espacios.push(f.e);
+            });
+            return Object.values(por).sort((x, y) => String(x.familia).localeCompare(String(y.familia)) || String(x.nombre).localeCompare(String(y.nombre)));
+        }
+
+        function repoMaquinaActual() {
+            return state.maquinas.find(m => String(m.id) === String(state.repoMaquina)) || null;
+        }
+
+        window.repoElegirMaquina = function(id) {
+            state.repoMaquina = String(id);
+            state.repoDraft = repoCargarBorrador(id);
+            state.repoError = '';
+            render();
+        };
+
+        window.repoSet = function(espacio, campo, valor) {
+            const d = state.repoDraft;
+            if (!d) return;
+            const o = d.filas[espacio] = d.filas[espacio] || {};
+            if (campo === 'listo') {
+                o.listo = !!valor;
+            } else {
+                const txt = String(valor).trim();
+                const n = parseInt(txt, 10);
+                if (txt === '' || isNaN(n)) delete o[campo];
+                else o[campo] = Math.max(0, n);
+            }
+            state.repoError = '';
+            repoRespaldar();
+            render();
+        };
+
+        window.repoSetGeneral = function(campo, valor) {
+            const d = state.repoDraft;
+            if (!d) return;
+            d[campo] = String(valor || '');
+            state.repoError = '';
+            repoRespaldar();
+            render();
+        };
+
+        window.repoAhora = function() { window.repoSetGeneral('fecha', ahoraLocalMin()); };
+
+        window.repoSacado = function(sku, valor) {
+            const d = state.repoDraft;
+            if (!d) return;
+            d.sacado[sku] = !!valor;
+            state.repoError = '';
+            repoRespaldar();
+            render();
+        };
+
+        window.repoDescartar = function() {
+            const d = state.repoDraft;
+            if (!d) return;
+            if (!confirm('¿Descartar lo anotado en esta reposición? No se guardó nada en la base de datos.')) return;
+            try { localStorage.removeItem(repoClave(d.maquinaId)); } catch (e) {}
+            state.repoDraft = repoNuevoBorrador(d.maquinaId);
+            state.repoError = '';
+            render();
+        };
+
+        window.repoGuardar = async function() {
+            const maquina = repoMaquinaActual();
+            const d = state.repoDraft;
+            if (!maquina || !d || state.repoGuardando) return;
+            state.repoError = '';
+            const fecha = d.fecha;
+            const baseActual = maxBaseConfig(getConfigConteo(maquina));
+            if (!RE_FECHA_MIN.test(fecha || '')) state.repoError = 'Indica la fecha y hora en que terminaste la reposición.';
+            else if (fecha > ahoraLocalMin()) state.repoError = 'La hora de la reposición no puede ser futura.';
+            else if (baseActual && fecha <= baseActual) state.repoError = `La hora debe ser posterior al conteo base actual (${fmtBase(baseActual)}).`;
+            else if (!state.demoMode && !state.reposicionesOk) state.repoError = 'Falta crear la tabla de reposiciones en Supabase (reposiciones_v1.sql).';
+            const filas = state.repoError ? [] : repoFilas(maquina, d);
+            if (!state.repoError && !filas.length) state.repoError = 'Esta máquina no tiene espacios asignados.';
+            if (state.repoError) { render(); return; }
+
+            const llevar = filas.reduce((t, f) => t + f.llevar, 0);
+            const retirar = filas.reduce((t, f) => t + f.retirar, 0);
+            const dif = filas.reduce((t, f) => t + f.diferencia, 0);
+            const pendientes = filas.filter(f => !f.listo).length;
+            const msg = `Guardar reposición de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
+                + `• Repuestas: ${llevar} u · Retiradas: ${retirar} u\n`
+                + `• Diferencia contra lo esperado: ${dif > 0 ? '+' : ''}${dif} u\n`
+                + (pendientes ? `• ${pendientes} espacio(s) sin marcar como revisado (se guardan con los valores sugeridos)\n` : '')
+                + `\nLa cantidad de cada espacio pasará a ser lo anotado en "Dejé" y esta hora será el nuevo conteo base de toda la máquina. La bodega no se modifica.`;
+            if (!confirm(msg)) return;
+
+            const detalle = filas.map(f => ({
+                asignacion_id: String(f.a.id), espacio: f.e, sku: f.sku,
+                base_anterior: f.base || null, cargado_anterior: f.cargado,
+                encontrado: f.encontrado, final: f.final
+            }));
+
+            state.repoGuardando = true;
+            render();
+            try {
+                if (state.demoMode) {
+                    state.reposiciones.unshift({ id: 'demo-rep-' + Date.now(), maquina_id: maquina.id, fecha_hora_local: fecha, detalle, notas: d.notas, usuario: state.currentUser || 'demo', created_at: new Date().toISOString() });
+                    detalle.forEach(x => { const a = state.asignaciones.find(a => String(a.id) === x.asignacion_id); if (a) a.cantidad_asignada = x.final; });
+                } else {
+                    if (typeof supabaseClient.rpc !== 'function') throw new Error('Supabase no disponible (sin conexión)');
+                    const { error } = await supabaseClient.rpc('registrar_reposicion', {
+                        p_maquina_id: String(maquina.id), p_fecha_hora_local: fecha, p_detalle: detalle,
+                        p_notas: d.notas || null, p_usuario: state.currentUser || null
+                    });
+                    if (error) throw error;
+                }
+                guardarHistorial('REPOSICION', `${maquina.nombre} ${fmtBase(fecha)}: +${llevar} u repuestas, ${retirar} retiradas, diferencia ${dif > 0 ? '+' : ''}${dif} u en ${filas.length} espacios`);
+                try { localStorage.removeItem(repoClave(maquina.id)); } catch (e) {}
+                if (!state.demoMode) await Promise.all([fetchAsignaciones(), fetchReposiciones()]);
+                state.repoDraft = repoNuevoBorrador(maquina.id);
+                alert('✅ Reposición guardada. El stock de la máquina parte de nuevo desde esta hora.');
+            } catch (err) {
+                console.error('Error guardando reposición:', err);
+                state.repoError = 'No se pudo guardar: ' + (err && err.message ? err.message : 'error desconocido') + '. Lo anotado sigue en este borrador.';
+            } finally {
+                state.repoGuardando = false;
+                render();
+            }
+        };
+
+        // Diferencias de una reposición ya guardada. Se recalcula con las ventas importadas hoy,
+        // así que si se importan ventas atrasadas la diferencia se corrige sola.
+        function repoResumenGuardada(maquina, rep) {
+            const det = Array.isArray(rep.detalle) ? rep.detalle : [];
+            const bases = {};
+            det.forEach(x => { bases[normEspacio(x.espacio)] = x.base_anterior || null; });
+            const vend = unidadesVendidasEntre(maquina, e => bases[e], rep.fecha_hora_local);
+            const filas = det.map(x => {
+                const e = normEspacio(x.espacio);
+                const prod = state.inventario.find(p => String(p.sku) === String(x.sku)) || null;
+                const cargado = Number(x.cargado_anterior) || 0;
+                const esperado = x.base_anterior ? Math.max(0, cargado - (vend[e] || 0)) : cargado;
+                const encontrado = Number(x.encontrado) || 0;
+                const fin = Number(x.final) || 0;
+                return { e, nombre: prod ? prod.nombre_producto : x.sku, esperado, encontrado, final: fin,
+                    diferencia: encontrado - esperado, llevar: Math.max(0, fin - encontrado), retirar: Math.max(0, encontrado - fin),
+                    costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0 };
+            });
+            const faltan = filas.filter(f => f.diferencia < 0);
+            const sobran = filas.filter(f => f.diferencia > 0);
+            return {
+                filas,
+                llevar: filas.reduce((t, f) => t + f.llevar, 0),
+                retirar: filas.reduce((t, f) => t + f.retirar, 0),
+                faltanU: -faltan.reduce((t, f) => t + f.diferencia, 0),
+                sobranU: sobran.reduce((t, f) => t + f.diferencia, 0),
+                faltanCosto: -faltan.reduce((t, f) => t + f.diferencia * f.costo, 0),
+                conDiferencia: filas.filter(f => f.diferencia !== 0)
+            };
+        }
+
+        function renderReponer() {
+            if (!state.repoMaquina && state.maquinas.length) {
+                state.repoMaquina = String(state.maquinas[0].id);
+            }
+            const maquina = repoMaquinaActual();
+            if (maquina && (!state.repoDraft || String(state.repoDraft.maquinaId) !== String(maquina.id))) {
+                state.repoDraft = repoCargarBorrador(maquina.id);
+            }
+            const selector = `
+                <div class="flex flex-wrap gap-2">
+                    ${state.maquinas.map(m => `
+                        <button onclick="window.repoElegirMaquina('${esc(m.id)}')" class="px-4 py-2 rounded-lg font-semibold border ${String(m.id) === String(state.repoMaquina) ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300'}">${esc(m.nombre)}</button>`).join('')}
+                </div>`;
+            if (!maquina) {
+                return `<div class="space-y-4"><h2 class="text-2xl font-bold">🚚 Reponer</h2><p class="text-gray-600">No hay máquinas configuradas.</p></div>`;
+            }
+
+            const d = state.repoDraft;
+            const filas = repoFilas(maquina, d);
+            const sacar = repoSacarBodega(filas);
+            const cfg = getConfigConteo(maquina);
+            const baseActual = maxBaseConfig(cfg);
+            const ultimaVenta = getUltimaVenta();
+            const ventasAtrasadas = RE_FECHA_MIN.test(d.fecha || '') && (!ultimaVenta || String(ultimaVenta).replace(' ', 'T').substring(0, 16) < d.fecha);
+            const totLlevar = filas.reduce((t, f) => t + f.llevar, 0);
+            const totRetirar = filas.reduce((t, f) => t + f.retirar, 0);
+            const totDif = filas.reduce((t, f) => t + f.diferencia, 0);
+            const faltanCosto = -filas.filter(f => f.diferencia < 0).reduce((t, f) => t + f.diferencia * f.costo, 0);
+            const revisados = filas.filter(f => f.listo).length;
+            const sinCap = filas.filter(f => !f.cap).length;
+            const chipDif = n => n === 0 ? '' : `<span class="text-xs font-bold px-2 py-0.5 rounded-full ${n < 0 ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800'}">${n < 0 ? `faltan ${-n}` : `sobran ${n}`}</span>`;
+            const chipVence = dias => dias === null || dias > VENCE_AMARILLO ? '' : `<span class="text-xs font-bold px-2 py-0.5 rounded-full ${dias <= VENCE_ROJO ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${textoDiasVencer(dias)}</span>`;
+            const historial = state.reposiciones.filter(r => String(r.maquina_id) === String(maquina.id)).slice(0, 10);
+
+            return `
+                <div class="space-y-6">
+                    <div class="flex flex-wrap items-end justify-between gap-3">
+                        <div>
+                            <h2 class="text-2xl font-bold">🚚 Reponer</h2>
+                            <p class="text-gray-600 text-sm">Hoja de ruta, conteo y registro de la reposición. Al guardar, el stock de la máquina parte desde esta hora.</p>
+                        </div>
+                        ${selector}
+                    </div>
+
+                    ${!state.demoMode && !state.reposicionesOk ? `
+                        <div class="p-4 bg-amber-50 border border-amber-300 rounded-lg text-sm text-amber-900">
+                            ⚠️ Falta crear la tabla de reposiciones en Supabase (archivo <strong>reposiciones_v1.sql</strong>). Puedes usar la hoja de ruta, pero todavía no se puede guardar.
+                        </div>` : ''}
+
+                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <label class="block text-sm font-bold text-gray-700">Hora en que terminaste
+                                <div class="mt-1 flex gap-2">
+                                    <input type="datetime-local" id="repoFecha" value="${esc(d.fecha)}" onchange="window.repoSetGeneral('fecha', this.value)" class="flex-1 min-w-0 border p-2 rounded font-normal">
+                                    <button type="button" onclick="window.repoAhora()" class="px-3 rounded border border-gray-300 text-sm font-semibold">Ahora</button>
+                                </div>
+                            </label>
+                            <label class="block text-sm font-bold text-gray-700 md:col-span-2">Notas (opcional)
+                                <input type="text" id="repoNotas" value="${esc(d.notas)}" onchange="window.repoSetGeneral('notas', this.value)" placeholder="Ej: espacio 23 trabado, se retiraron 2 vencidos" class="mt-1 w-full border p-2 rounded font-normal">
+                            </label>
+                        </div>
+                        <div class="text-xs text-gray-600">Conteo base actual: <strong>${baseActual ? fmtBase(baseActual) : 'sin conteo'}</strong>${cfg && cfg.reposicion ? ' (última reposición registrada)' : ''} · Ventas importadas hasta: <strong>${ultimaVenta ? fmtFecha(ultimaVenta) + ' ' + String(ultimaVenta).substring(11, 16) : 'sin datos'}</strong></div>
+                        ${ventasAtrasadas ? `
+                            <div class="p-3 bg-amber-50 border border-amber-300 rounded text-sm text-amber-900">
+                                ⚠️ Las ventas importadas llegan hasta antes de la hora de la reposición. Lo esperado puede salir más alto y aparecer como "faltan". Importa las ventas de PayScan antes de contar; si no alcanzas, guarda igual: el historial se recalcula cuando importes.
+                            </div>` : ''}
+                    </div>
+
+                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
+                        <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+                            <h3 class="font-bold text-lg">1. Sacar de bodega</h3>
+                            <span class="text-sm text-gray-600">${totLlevar} unidades · ${sacar.length} productos</span>
+                        </div>
+                        ${sacar.length ? `
+                            <table class="tabla-resp w-full text-sm">
+                                <thead><tr class="text-left text-xs uppercase text-gray-500 border-b"><th class="py-2 w-10">Listo</th><th class="py-2">Producto</th><th class="py-2">Espacios</th><th class="py-2 text-right">Llevar</th><th class="py-2 text-right">Bodega</th></tr></thead>
+                                <tbody>
+                                    ${sacar.map(s => `
+                                        <tr class="border-b ${d.sacado[s.sku] ? 'opacity-50' : ''}">
+                                            <td class="py-2"><input type="checkbox" id="repoSac-${esc(s.sku)}" ${d.sacado[s.sku] ? 'checked' : ''} onchange="window.repoSacado(${esc(JSON.stringify(s.sku))}, this.checked)" class="w-5 h-5"></td>
+                                            <td class="py-2 font-semibold">${esc(s.nombre)}</td>
+                                            <td class="py-2 text-gray-600">${s.espacios.map(esc).join(', ')}</td>
+                                            <td class="py-2 text-right font-bold tabular-nums">${s.llevar}</td>
+                                            <td class="py-2 text-right tabular-nums ${s.bodega < s.llevar ? 'text-red-700 font-bold' : ''}">${s.bodega}${s.bodega < s.llevar ? ' ⚠️' : ''}</td>
+                                        </tr>`).join('')}
+                                </tbody>
+                            </table>
+                            <p class="text-xs text-gray-500 mt-2">Llevar = lo que dejarás − lo que hay. Bodega en rojo: no alcanza. La bodega no se descuenta sola; actualízala como siempre.</p>
+                        ` : `<p class="text-sm text-gray-500">✓ No hace falta llevar nada con los valores actuales.</p>`}
+                        ${sinCap ? `<p class="text-xs text-amber-700 mt-2">${sinCap} espacio${sinCap === 1 ? '' : 's'} sin capacidad cargada: se sugiere llenar hasta la última cantidad cargada. Configura las capacidades en Máquinas → Editar.</p>` : ''}
+                    </div>
+
+                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
+                        <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+                            <h3 class="font-bold text-lg">2. En la máquina</h3>
+                            <span class="text-sm text-gray-600">${revisados} de ${filas.length} espacios revisados</span>
+                        </div>
+                        <p class="text-xs text-gray-500 mb-4">Anota cuánto <strong>encontraste</strong> al abrir y cuánto <strong>dejaste</strong>. Vienen sugeridos con lo esperado y la capacidad; cambia solo lo que no calce.</p>
+                        <div class="divide-y">
+                            ${filas.map(f => `
+                                <div class="py-3 grid grid-cols-[auto_1fr] sm:grid-cols-[auto_1fr_auto] gap-x-3 gap-y-2 items-center ${f.listo ? 'opacity-60' : ''}">
+                                    <input type="checkbox" id="repoListo-${f.e}" ${f.listo ? 'checked' : ''} onchange="window.repoSet('${f.e}', 'listo', this.checked)" class="w-5 h-5" aria-label="Espacio ${f.e} revisado">
+                                    <div class="min-w-0">
+                                        <div class="font-semibold text-sm"><span class="font-mono text-gray-500">${f.e}</span> <span class="text-xs text-gray-400">${bandejaPos(f.e)}</span> · ${esc(f.nombre)}</div>
+                                        <div class="text-xs text-gray-600 flex flex-wrap gap-x-2 gap-y-1 items-center mt-0.5">
+                                            <span>Esperado <strong>${f.esperado}</strong>${f.base ? ` (cargado ${f.cargado} − ${f.vendidas} vend.)` : ' (sin conteo base)'}</span>
+                                            ${f.cap ? `<span>Cap. ${f.cap}</span>` : ''}
+                                            ${chipDif(f.diferencia)}${chipVence(f.dias)}
+                                            ${f.llevar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">+${f.llevar}</span>` : ''}
+                                            ${f.retirar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-200 text-gray-800">retirar ${f.retirar}</span>` : ''}
+                                        </div>
+                                    </div>
+                                    <div class="col-start-2 sm:col-start-3 flex gap-2">
+                                        <label class="text-xs text-gray-600 font-semibold">Encontré
+                                            <input type="number" inputmode="numeric" min="0" id="repoEnc-${f.e}" value="${f.encontrado}" onchange="window.repoSet('${f.e}', 'encontrado', this.value)" class="block w-20 border p-2 rounded text-base font-normal tabular-nums">
+                                        </label>
+                                        <label class="text-xs text-gray-600 font-semibold">Dejé
+                                            <input type="number" inputmode="numeric" min="0" id="repoFin-${f.e}" value="${f.final}" onchange="window.repoSet('${f.e}', 'final', this.value)" class="block w-20 border p-2 rounded text-base font-normal tabular-nums">
+                                        </label>
+                                    </div>
+                                </div>`).join('')}
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow space-y-3">
+                        <h3 class="font-bold text-lg">3. Guardar</h3>
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                            <div class="p-3 bg-green-50 rounded"><div class="text-xs text-gray-600">Repuestas</div><div class="text-xl font-bold tabular-nums">${totLlevar} u</div></div>
+                            <div class="p-3 bg-gray-50 rounded"><div class="text-xs text-gray-600">Retiradas</div><div class="text-xl font-bold tabular-nums">${totRetirar} u</div></div>
+                            <div class="p-3 ${totDif < 0 ? 'bg-red-50' : 'bg-blue-50'} rounded"><div class="text-xs text-gray-600">Diferencia vs esperado</div><div class="text-xl font-bold tabular-nums">${totDif > 0 ? '+' : ''}${totDif} u</div></div>
+                            <div class="p-3 bg-red-50 rounded"><div class="text-xs text-gray-600">Faltantes a costo</div><div class="text-xl font-bold tabular-nums">$${clp(faltanCosto)}</div></div>
+                        </div>
+                        ${state.repoError ? `<div class="p-3 bg-red-50 border border-red-300 rounded text-sm text-red-800" role="alert">${esc(state.repoError)}</div>` : ''}
+                        <div class="flex flex-wrap gap-2">
+                            <button onclick="window.repoGuardar()" ${state.repoGuardando ? 'disabled' : ''} class="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold disabled:opacity-60">${state.repoGuardando ? 'Guardando…' : 'Guardar reposición'}</button>
+                            <button onclick="window.repoDescartar()" class="px-6 py-3 rounded-lg font-semibold border border-gray-300 text-gray-700">Descartar borrador</button>
+                        </div>
+                        <p class="text-xs text-gray-500">Lo anotado se respalda en este navegador hasta que guardes o descartes.</p>
+                    </div>
+
+                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
+                        <h3 class="font-bold text-lg mb-1">Reposiciones anteriores</h3>
+                        <p class="text-xs text-gray-500 mb-3">Las diferencias se recalculan con las ventas importadas hasta hoy.</p>
+                        ${historial.length ? `<div class="divide-y">${historial.map(r => {
+                            const s = repoResumenGuardada(maquina, r);
+                            return `
+                                <details class="py-3">
+                                    <summary class="cursor-pointer flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                                        <strong>${fmtBase(r.fecha_hora_local)}</strong>
+                                        <span class="text-gray-600">+${s.llevar} repuestas · ${s.retirar} retiradas</span>
+                                        ${s.faltanU ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-800">faltan ${s.faltanU} ($${clp(s.faltanCosto)} a costo)</span>` : ''}
+                                        ${s.sobranU ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">sobran ${s.sobranU}</span>` : ''}
+                                        ${!s.faltanU && !s.sobranU ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">cuadra</span>' : ''}
+                                        <span class="text-xs text-gray-500">${esc(r.usuario || '')}</span>
+                                    </summary>
+                                    ${r.notas ? `<p class="text-sm text-gray-700 mt-2">📝 ${esc(r.notas)}</p>` : ''}
+                                    ${s.conDiferencia.length ? `
+                                        <div class="overflow-x-auto mt-2">
+                                            <table class="w-full text-sm">
+                                                <thead><tr class="text-left text-xs uppercase text-gray-500 border-b"><th class="py-1">Espacio</th><th class="py-1">Producto</th><th class="py-1 text-right">Esperado</th><th class="py-1 text-right">Encontré</th><th class="py-1 text-right">Dif.</th></tr></thead>
+                                                <tbody>${s.conDiferencia.map(f => `<tr class="border-b"><td class="py-1 font-mono">${f.e}</td><td class="py-1">${esc(f.nombre)}</td><td class="py-1 text-right tabular-nums">${f.esperado}</td><td class="py-1 text-right tabular-nums">${f.encontrado}</td><td class="py-1 text-right font-bold tabular-nums ${f.diferencia < 0 ? 'text-red-700' : 'text-blue-700'}">${f.diferencia > 0 ? '+' : ''}${f.diferencia}</td></tr>`).join('')}</tbody>
+                                            </table>
+                                        </div>` : '<p class="text-sm text-gray-500 mt-2">Todos los espacios cuadraron.</p>'}
+                                </details>`;
+                        }).join('')}</div>` : '<p class="text-sm text-gray-500">Todavía no hay reposiciones registradas para esta máquina.</p>'}
+                    </div>
+                </div>`;
         }
 
         // ============================================
@@ -3277,7 +3734,7 @@
                                 <div class="font-bold mb-1">📉 Stock estimado = cantidad cargada − ventas posteriores al conteo</div>
                                 <div>${cfgConteo.bandejas
                                     ? Object.keys(cfgConteo.bandejas).map(b => `B${b}: ${fmtBase(cfgConteo.bandejas[b])}`).join(' · ') + (cfgConteo.todas ? ` · resto: ${fmtBase(cfgConteo.todas)}` : '')
-                                    : `Conteo base (toda la máquina): ${fmtBase(cfgConteo.todas)}`}</div>
+                                    : `${cfgConteo.reposicion ? 'Última reposición registrada' : 'Conteo base'} (toda la máquina): ${fmtBase(cfgConteo.todas)}`}</div>
                                 <div class="mt-1">El número grande es lo que queda; <strong>−N vend.</strong> son las unidades vendidas desde el conteo. En rojo: se vendió más de lo cargado (revisa el conteo o la asignación).</div>
                             </div>
                         ` : `
@@ -3760,6 +4217,7 @@
             inventario: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5"/><path d="M12 22V12"/>',
             espacios: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
             maquinas: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h5"/><path d="M8 10h5"/><path d="M8 14h5"/><path d="M17 6v2"/><path d="M8 18h8"/>',
+            reponer: '<path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/>',
             historial: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
             actualizar: '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
             salir: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
@@ -3773,6 +4231,7 @@
             { id: 'analytics', label: 'Analítica', largo: 'Analítica', icono: 'analitica' },
             { id: 'inventario', label: 'Inventario', largo: 'Inventario', icono: 'inventario' },
             { id: 'asignaciones', label: 'Espacios', largo: 'Asignaciones', icono: 'espacios' },
+            { id: 'reponer', label: 'Reponer', largo: 'Reponer', icono: 'reponer' },
             { id: 'maquinas', label: 'Máquinas', largo: 'Máquinas', icono: 'maquinas' },
             { id: 'historial', label: 'Historial', largo: 'Historial', icono: 'historial', soloEscritorio: true }
         ];
@@ -3850,6 +4309,7 @@
                 dashboard: renderDashboard,
                 inventario: renderInventario,
                 asignaciones: renderAsignaciones,
+                reponer: renderReponer,
                 historial: renderHistorial,
                 maquinas: renderMaquinas,
                 analytics: renderAnalytics,
@@ -3926,7 +4386,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v5.0 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v7 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
