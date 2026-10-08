@@ -1848,7 +1848,11 @@
                     const cap = capacidadEspacio(maquina, e);
                     const objetivo = cap || cargado;
                     const encontrado = Number.isInteger(o.encontrado) ? o.encontrado : esperado;
-                    const fin = Number.isInteger(o.final) ? o.final : (cambio ? objetivo : Math.max(objetivo, encontrado));
+                    // v11: el espacio solo se repone si se marca "Repuse" (o se cambia el producto o se escribe Dejé).
+                    // Sin marcar, Dejé = Encontré: no entra nada y la bodega no se descuenta.
+                    const repuesto = !!o.listo || cambio || Number.isInteger(o.final);
+                    const sugerido = cambio ? objetivo : Math.max(objetivo, encontrado);
+                    const fin = Number.isInteger(o.final) ? o.final : (repuesto ? sugerido : encontrado);
                     const precioActual = Number(a.precio_venta_espacio) || 0;
                     const precioNuevo = cambio ? (Number.isInteger(o.precioNuevo) ? o.precioNuevo : (prodNuevo ? Number(prodNuevo.precio_venta_unitario) || 0 : 0)) : null;
                     const entra = cambio ? prodNuevo : prod;
@@ -1863,7 +1867,9 @@
                         llevar: cambio ? fin : Math.max(0, fin - encontrado),
                         retirar: cambio ? encontrado : Math.max(0, encontrado - fin),
                         skuEntra: cambio ? String(o.skuNuevo) : String(a.sku),
-                        listo: !!o.listo,
+                        listo: repuesto,
+                        // Lo que se planea llevar (para la lista de bodega), aunque todavía no esté marcado
+                        planLlevar: repuesto ? (cambio ? fin : Math.max(0, fin - encontrado)) : Math.max(0, sugerido - encontrado),
                         costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0,
                         dias: prod ? diasParaVencer(prod.fecha_caducidad) : null,
                         diasEntra: entra ? diasParaVencer(entra.fecha_caducidad) : null
@@ -1884,7 +1890,7 @@
                 return por[sku];
             };
             filas.forEach(f => {
-                if (f.llevar) { const r = fila(f.skuEntra); r.entra += f.llevar; r.espacios.push(f.e); }
+                if (f.planLlevar) { const r = fila(f.skuEntra); r.entra += f.planLlevar; r.espacios.push(f.e); }
             });
             filas.forEach(f => {
                 if (f.retirar && por[f.sku] && !(f.dias !== null && f.dias < 0)) por[f.sku].reusa += f.retirar;
@@ -1913,6 +1919,7 @@
             const o = d.filas[espacio] = d.filas[espacio] || {};
             if (campo === 'listo' || campo === 'cambiando') {
                 o[campo] = !!valor;
+                if (campo === 'listo' && !valor) delete o.final;
             } else {
                 const txt = String(valor).trim();
                 const n = parseInt(txt.replace(/\./g, ''), 10);
@@ -1995,13 +2002,13 @@
             const llevar = filas.reduce((t, f) => t + f.llevar, 0);
             const retirar = filas.reduce((t, f) => t + f.retirar, 0);
             const dif = filas.reduce((t, f) => t + f.diferencia, 0);
-            const pendientes = filas.filter(f => !f.listo).length;
+            const repuestos = filas.filter(f => f.listo).length;
             const cambios = filas.filter(f => f.cambio);
             const msg = `Guardar reposición de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
                 + `• Entran: ${llevar} u · Salen: ${retirar} u\n`
                 + `• Diferencia contra lo esperado: ${dif > 0 ? '+' : ''}${dif} u\n`
                 + (cambios.length ? `• Cambios de producto:\n${cambios.map(f => `   ${f.e}: ${f.nombre} → ${f.nombreNuevo} a $${clp(f.precioNuevo)}`).join('\n')}\n  Recuerda cambiar también el precio en la máquina.\n` : '')
-                + (pendientes ? `• ${pendientes} espacio(s) sin marcar como revisado (se guardan con los valores sugeridos)\n` : '')
+                + `• Espacios repuestos: ${repuestos} de ${filas.length}. Los demás quedan como los encontraste (no entra nada).\n`
                 + `\nLa cantidad de cada espacio pasará a ser lo anotado en "Dejé" y esta hora será el nuevo conteo base de toda la máquina. Después podrás actualizar la bodega.`;
             if (!confirm(msg)) return;
 
@@ -2251,7 +2258,7 @@
             const totSacar = sacar.reduce((t, s) => t + s.llevar, 0);
             const totDif = filas.reduce((t, f) => t + f.diferencia, 0);
             const faltanCosto = -filas.filter(f => f.diferencia < 0).reduce((t, f) => t + f.diferencia * f.costo, 0);
-            const revisados = filas.filter(f => f.listo).length;
+            const revisados = filas.filter(f => f.listo).length;  // espacios marcados como repuestos
             const sinCap = filas.filter(f => !f.cap).length;
             const chipDif = n => n === 0 ? '' : `<span class="text-xs font-bold px-2 py-0.5 rounded-full ${n < 0 ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800'}">${n < 0 ? `faltan ${-n}` : `sobran ${n}`}</span>`;
             const chipVence = dias => dias === null || dias > VENCE_AMARILLO ? '' : `<span class="text-xs font-bold px-2 py-0.5 rounded-full ${dias <= VENCE_ROJO ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${textoDiasVencer(dias)}</span>`;
@@ -2315,7 +2322,7 @@
                                         </tr>`).join('')}
                                 </tbody>
                             </table>
-                            <p class="text-xs text-gray-500 mt-2">Sacar = lo que dejarás − lo que hay. Puedes llevar de más: la bodega solo se descuenta con lo que realmente entra a la máquina (paso 4).</p>
+                            <p class="text-xs text-gray-500 mt-2">Sacar = lo sugerido para llenar cada espacio. Puedes llevar de más: la bodega solo descuenta los espacios que marques como repuestos (paso 4).</p>
                         ` : `<p class="text-sm text-gray-500">✓ No hace falta llevar nada con los valores actuales.</p>`}
                         ${sinCap ? `<p class="text-xs text-amber-700 mt-2">${sinCap} espacio${sinCap === 1 ? '' : 's'} sin capacidad cargada: se sugiere llenar hasta la última cantidad cargada. Configura las capacidades en Máquinas → Editar.</p>` : ''}
                     </div>
@@ -2323,13 +2330,13 @@
                     <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
                         <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
                             <h3 class="font-bold text-lg">2. En la máquina</h3>
-                            <span class="text-sm text-gray-600">${revisados} de ${filas.length} espacios revisados</span>
+                            <span class="text-sm text-gray-600">${revisados} de ${filas.length} espacios repuestos</span>
                         </div>
-                        <p class="text-xs text-gray-500 mb-4">Anota cuánto <strong>encontraste</strong> al abrir y cuánto <strong>dejaste</strong>. Vienen sugeridos con lo esperado y la capacidad; cambia solo lo que no calce. Para poner otro producto en un espacio usa <strong>Cambiar producto</strong>.</p>
+                        <p class="text-xs text-gray-500 mb-4">Marca <strong>Repuse</strong> en cada espacio que llenaste: se sugiere llenarlo hasta la capacidad y puedes ajustar <strong>Dejé</strong>. Los espacios sin marcar quedan como los encontraste y no descuentan bodega. Si contaste un espacio, corrige <strong>Encontré</strong>. Para poner otro producto usa <strong>Cambiar producto</strong>.</p>
                         <div class="divide-y">
                             ${filas.map(f => `
-                                <div class="py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[auto_minmax(0,1fr)_auto] gap-x-3 gap-y-2 items-center ${f.listo ? 'opacity-60' : ''}">
-                                    <input type="checkbox" id="repoListo-${f.e}" ${f.listo ? 'checked' : ''} onchange="window.repoSet('${f.e}', 'listo', this.checked)" class="w-5 h-5" aria-label="Espacio ${f.e} revisado">
+                                <div class="py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[auto_minmax(0,1fr)_auto] gap-x-3 gap-y-2 items-center ${f.listo ? 'bg-green-50 -mx-2 px-2 rounded' : ''}">
+                                    <label class="flex flex-col items-center gap-0.5 text-[10px] font-semibold ${f.listo ? 'text-green-700' : 'text-gray-500'}"><input type="checkbox" id="repoListo-${f.e}" ${f.listo ? 'checked' : ''} ${f.cambio ? 'disabled' : ''} onchange="window.repoSet('${f.e}', 'listo', this.checked)" class="w-6 h-6" aria-label="Repuse el espacio ${f.e}">Repuse</label>
                                     <div class="min-w-0">
                                         <div class="font-semibold text-sm"><span class="font-mono text-gray-500">${f.e}</span> <span class="text-xs text-gray-400">${bandejaPos(f.e)}</span> · ${f.cambio ? `<span class="line-through text-gray-500">${esc(f.nombre)}</span> → <span class="text-blue-800">${esc(f.nombreNuevo)}</span>` : esc(f.nombre)}</div>
                                         <div class="text-xs text-gray-600 flex flex-wrap gap-x-2 gap-y-1 items-center mt-0.5">
@@ -5068,7 +5075,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v10 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v11 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
