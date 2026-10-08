@@ -1870,10 +1870,22 @@
                         listo: repuesto,
                         // Lo que se planea llevar (para la lista de bodega), aunque todavía no esté marcado
                         planLlevar: repuesto ? (cambio ? fin : Math.max(0, fin - encontrado)) : Math.max(0, sugerido - encontrado),
+                        // v12: parte de las unidades salió de otro producto/lote de bodega (o.altSku, o.altCant)
+                        altAbierto: !!o.altAbierto,
+                        altSku: o.altSku && String(o.altSku) !== String(cambio ? o.skuNuevo : a.sku) ? String(o.altSku) : null,
+                        altCantPedida: Number.isInteger(o.altCant) ? o.altCant : null,
                         costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0,
                         dias: prod ? diasParaVencer(prod.fecha_caducidad) : null,
                         diasEntra: entra ? diasParaVencer(entra.fecha_caducidad) : null
                     };
+                }).map(f => {
+                    const prodAlt = f.altSku ? state.inventario.find(p => String(p.sku) === f.altSku) || null : null;
+                    const bodegaPropia = (() => { const p = state.inventario.find(p => String(p.sku) === f.skuEntra); return p ? Number(p.cantidad_actual) || 0 : 0; })();
+                    const defecto = Math.max(1, f.planLlevar - bodegaPropia);
+                    const pedida = f.altSku ? (f.altCantPedida ?? defecto) : 0;
+                    return { ...f, prodAlt, nombreAlt: prodAlt ? prodAlt.nombre_producto : (f.altSku || ''),
+                        altCant: f.altSku ? Math.min(pedida, f.listo ? f.llevar : f.planLlevar) : 0,
+                        altPlan: f.altSku ? Math.min(pedida, f.planLlevar) : 0 };
                 });
         }
 
@@ -1890,13 +1902,18 @@
                 return por[sku];
             };
             filas.forEach(f => {
-                if (f.planLlevar) { const r = fila(f.skuEntra); r.entra += f.planLlevar; r.espacios.push(f.e); }
+                if (f.planLlevar - f.altPlan > 0) { const r = fila(f.skuEntra); r.entra += f.planLlevar - f.altPlan; r.espacios.push(f.e); }
+                if (f.altPlan > 0) { const r = fila(f.altSku); r.entra += f.altPlan; r.espacios.push(`${f.e} (en vez de ${nombreBase(f.nombreNuevo || f.nombre)})`); }
             });
             filas.forEach(f => {
                 if (f.retirar && por[f.sku] && !(f.dias !== null && f.dias < 0)) por[f.sku].reusa += f.retirar;
             });
+            const otrosLotes = sku => {
+                const base = String(sku).replace(/-L\d+$/, '');
+                return state.inventario.filter(p => String(p.sku) !== String(sku) && String(p.sku).replace(/-L\d+$/, '') === base && (Number(p.cantidad_actual) || 0) > 0);
+            };
             return Object.values(por)
-                .map(r => ({ ...r, reusa: Math.min(r.reusa, r.entra), llevar: Math.max(0, r.entra - r.reusa) }))
+                .map(r => ({ ...r, reusa: Math.min(r.reusa, r.entra), llevar: Math.max(0, r.entra - r.reusa), otros: otrosLotes(r.sku) }))
                 .sort((x, y) => String(x.familia).localeCompare(String(y.familia)) || String(x.nombre).localeCompare(String(y.nombre)));
         }
 
@@ -1917,7 +1934,7 @@
             const d = state.repoDraft;
             if (!d) return;
             const o = d.filas[espacio] = d.filas[espacio] || {};
-            if (campo === 'listo' || campo === 'cambiando') {
+            if (campo === 'listo' || campo === 'cambiando' || campo === 'altAbierto') {
                 o[campo] = !!valor;
                 if (campo === 'listo' && !valor) delete o.final;
             } else {
@@ -1932,6 +1949,17 @@
         };
 
         // Cambiar el producto de un espacio durante la reposición ('' = deshacer el cambio)
+        window.repoSetAlt = function(espacio, sku) {
+            const d = state.repoDraft;
+            if (!d) return;
+            const o = d.filas[espacio] = d.filas[espacio] || {};
+            if (!sku) { delete o.altSku; delete o.altCant; o.altAbierto = false; }
+            else { o.altSku = String(sku); delete o.altCant; }
+            state.repoError = '';
+            repoRespaldar();
+            render();
+        };
+
         window.repoSetProducto = function(espacio, sku) {
             const d = state.repoDraft;
             if (!d) return;
@@ -2004,10 +2032,12 @@
             const dif = filas.reduce((t, f) => t + f.diferencia, 0);
             const repuestos = filas.filter(f => f.listo).length;
             const cambios = filas.filter(f => f.cambio);
+            const alternos = filas.filter(f => f.altSku && f.altCant > 0);
             const msg = `Guardar reposición de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
                 + `• Entran: ${llevar} u · Salen: ${retirar} u\n`
                 + `• Diferencia contra lo esperado: ${dif > 0 ? '+' : ''}${dif} u\n`
                 + (cambios.length ? `• Cambios de producto:\n${cambios.map(f => `   ${f.e}: ${f.nombre} → ${f.nombreNuevo} a $${clp(f.precioNuevo)}`).join('\n')}\n  Recuerda cambiar también el precio en la máquina.\n` : '')
+                + (alternos.length ? `• Sacado de otro producto:\n${alternos.map(f => `   ${f.e}: ${f.altCant} de ${nombreBase(f.nombreAlt)}`).join('\n')}\n` : '')
                 + `• Espacios repuestos: ${repuestos} de ${filas.length}. Los demás quedan como los encontraste (no entra nada).\n`
                 + `\nLa cantidad de cada espacio pasará a ser lo anotado en "Dejé" y esta hora será el nuevo conteo base de toda la máquina. Después podrás actualizar la bodega.`;
             if (!confirm(msg)) return;
@@ -2019,6 +2049,7 @@
                     encontrado: f.encontrado, final: f.final
                 };
                 if (f.cambio) { x.sku_nuevo = f.skuNuevo; x.precio_anterior = f.precioActual; x.precio_nuevo = f.precioNuevo; }
+                if (f.altSku && f.altCant > 0) x.origen_alt = { sku: f.altSku, cantidad: f.altCant };
                 return x;
             });
 
@@ -2072,10 +2103,12 @@
             (Array.isArray(rep.detalle) ? rep.detalle : []).forEach(x => {
                 const enc = Number(x.encontrado) || 0, fin = Number(x.final) || 0;
                 const cambio = x.sku_nuevo && String(x.sku_nuevo) !== String(x.sku);
-                if (cambio) {
-                    if (fin) fila(String(x.sku_nuevo)).entra += fin;
-                    if (enc) fila(String(x.sku)).sale += enc;
-                } else if (fin > enc) fila(String(x.sku)).entra += fin - enc;
+                const skuEntra = String(cambio ? x.sku_nuevo : x.sku);
+                const entra = cambio ? fin : Math.max(0, fin - enc);
+                const alt = x.origen_alt && x.origen_alt.sku ? Math.min(entra, Number(x.origen_alt.cantidad) || 0) : 0;
+                if (entra - alt > 0) fila(skuEntra).entra += entra - alt;
+                if (alt > 0) fila(String(x.origen_alt.sku)).entra += alt;
+                if (cambio) { if (enc) fila(String(x.sku)).sale += enc; }
                 else if (enc > fin) fila(String(x.sku)).sale += enc - fin;
             });
             return Object.values(por).filter(m => m.entra || m.sale);
@@ -2225,7 +2258,8 @@
                 sobranU: sobran.reduce((t, f) => t + f.diferencia, 0),
                 faltanCosto: -faltan.reduce((t, f) => t + f.diferencia * f.costo, 0),
                 conDiferencia: filas.filter(f => f.diferencia !== 0),
-                cambios: filas.filter(f => f.cambio)
+                cambios: filas.filter(f => f.cambio),
+                alternos: det.filter(x => x.origen_alt && x.origen_alt.sku).map(x => `${normEspacio(x.espacio)}: ${Number(x.origen_alt.cantidad) || 0} de ${nombreBase(nombreDe(x.origen_alt.sku))}`)
             };
         }
 
@@ -2315,7 +2349,7 @@
                                     ${sacar.map(s => `
                                         <tr class="border-b ${d.sacado[s.sku] || !s.llevar ? 'opacity-50' : ''}">
                                             <td class="py-2"><input type="checkbox" id="repoSac-${esc(s.sku)}" ${d.sacado[s.sku] ? 'checked' : ''} onchange="window.repoSacado(${esc(JSON.stringify(s.sku))}, this.checked)" class="w-5 h-5"></td>
-                                            <td class="py-2 font-semibold">${esc(s.nombre)}${s.reusa ? `<div class="text-xs font-normal text-gray-600">${s.reusa} se reutilizan de otro espacio</div>` : ''}</td>
+                                            <td class="py-2 font-semibold">${esc(s.nombre)}${s.reusa ? `<div class="text-xs font-normal text-gray-600">${s.reusa} se reutilizan de otro espacio</div>` : ''}${s.bodega < s.llevar && s.otros.length ? `<div class="text-xs font-normal text-amber-800">No alcanza. Hay ${s.otros.map(p => `${Number(p.cantidad_actual) || 0} de ${esc(nombreBase(p.nombre_producto))}`).join(' · ')}: usa "Saqué de otro producto" en el espacio.</div>` : ''}</td>
                                             <td class="py-2 text-gray-600">${s.espacios.map(esc).join(', ')}</td>
                                             <td class="py-2 text-right font-bold tabular-nums">${s.llevar}</td>
                                             <td class="py-2 text-right tabular-nums ${s.bodega < s.llevar ? 'text-red-700 font-bold' : ''}">${s.bodega}${s.bodega < s.llevar ? ' ⚠️' : ''}</td>
@@ -2347,6 +2381,7 @@
                                             ${f.llevar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">entran ${f.llevar}</span>` : ''}
                                             ${f.retirar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-200 text-gray-800">salen ${f.retirar}</span>` : ''}
                                             <button type="button" onclick="window.repoSet('${f.e}', 'cambiando', ${f.abierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.cambio ? 'Editar cambio' : 'Cambiar producto'}</button>
+                                            <button type="button" onclick="window.repoSet('${f.e}', 'altAbierto', ${f.altAbierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.altSku ? ((f.altCant || f.altPlan) ? `${f.altCant || f.altPlan} de ${esc(nombreBase(f.nombreAlt))}` : `Desde ${esc(nombreBase(f.nombreAlt))}`) : 'Saqué de otro producto'}</button>
                                         </div>
                                         ${f.abierto || f.cambio ? `
                                             <div class="mt-2 p-3 bg-blue-50 border border-blue-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
@@ -2365,6 +2400,24 @@
                                                 <p class="text-xs text-gray-600 sm:col-span-3">${f.cambio
                                                     ? `Precio anterior $${clp(f.precioActual)}. Encontré = unidades de ${esc(f.nombre)} que sacas; Dejé = unidades de ${esc(f.nombreNuevo)}. Cambia también el precio en la máquina.`
                                                     : 'Elige el producto que quedará en este espacio.'}</p>
+                                            </div>` : ''}
+                                        ${f.altAbierto || f.altSku ? `
+                                            <div class="mt-2 p-3 bg-amber-50 border border-amber-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
+                                                <label class="text-xs text-gray-700 font-semibold min-w-0">Lo saqué de
+                                                    <select id="repoAlt-${f.e}" onchange="window.repoSetAlt('${f.e}', this.value)" class="block w-full max-w-full min-w-0 border p-2 rounded text-base font-normal bg-white">
+                                                        <option value="">— Solo de ${esc(nombreBase(f.nombreNuevo || f.nombre))} —</option>
+                                                        ${opcionesProducto.filter(p => String(p.sku) !== f.skuEntra).map(p => `<option value="${esc(p.sku)}" ${String(p.sku) === f.altSku ? 'selected' : ''}>${esc(p.nombre_producto)} · bodega ${Number(p.cantidad_actual) || 0}</option>`).join('')}
+                                                    </select>
+                                                </label>
+                                                ${f.altSku ? `
+                                                    <label class="text-xs text-gray-700 font-semibold">Unidades
+                                                        <input type="number" inputmode="numeric" min="1" id="repoAltCant-${f.e}" value="${f.altCant || f.altPlan || ''}" onchange="window.repoSet('${f.e}', 'altCant', this.value)" class="block w-24 border p-2 rounded text-base font-normal tabular-nums">
+                                                    </label>
+                                                    <button type="button" onclick="window.repoSetAlt('${f.e}', '')" class="px-3 py-2 rounded border border-gray-300 text-sm font-semibold bg-white">Quitar</button>
+                                                ` : ''}
+                                                <p class="text-xs text-gray-600 sm:col-span-3">${f.altSku
+                                                    ? (!(f.listo ? f.llevar : f.planLlevar) ? 'Todavía no entra ninguna unidad en este espacio: marca Repuse o escribe Dejé.' : `De las ${f.listo ? f.llevar : f.planLlevar} que entran, ${f.altCant || f.altPlan} se descuentan de ${esc(nombreBase(f.nombreAlt))} y el resto de ${esc(nombreBase(f.nombreNuevo || f.nombre))}. El espacio sigue asignado a ${esc(nombreBase(f.nombreNuevo || f.nombre))}.`)
+                                                    : 'Úsalo si no quedaba del producto del espacio y pusiste otro lote o sabor parecido.'}</p>
                                             </div>` : ''}
                                     </div>
                                     <div class="col-start-2 sm:col-start-3 flex gap-2">
@@ -2414,6 +2467,7 @@
                                         <span class="text-xs text-gray-500">${esc(r.usuario || '')}</span>
                                     </summary>
                                     ${r.notas ? `<p class="text-sm text-gray-700 mt-2">📝 ${esc(r.notas)}</p>` : ''}
+                                    ${s.alternos.length ? `<p class="text-sm text-gray-700 mt-2">🔀 Sacado de otro producto: ${s.alternos.map(esc).join(' · ')}</p>` : ''}
                                     ${s.cambios.length ? `<p class="text-sm text-gray-700 mt-2">🔁 ${s.cambios.map(f => `${f.e}: ${esc(f.nombre)} → ${esc(f.nombreNuevo)}`).join(' · ')}</p>` : ''}
                                     ${s.conDiferencia.length ? `
                                         <div class="overflow-x-auto mt-2">
@@ -5075,7 +5129,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v11 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v12 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
