@@ -185,6 +185,8 @@
             repoDevuelve: {},        // { repId: { sku: true/false } } ¿vuelve a bodega lo que salió?
             repoBodegaGuardando: false,
             repoBodegaError: '',
+            compraDias: 14,          // cobertura de la sugerencia de compra (días)
+            compraVerTodos: false,
             repoError: '',
             loading: true,
             showNewProductForm: false,
@@ -2346,6 +2348,194 @@
         }
 
         // ============================================
+        // QUÉ COMPRAR (v9, pestaña Inventario). Solo calcula; no modifica nada.
+        //   Ritmo de venta = unidades vendidas por día en los últimos VENTANA_COMPRA días (hasta la última venta
+        //   importada), contando cada máquina solo desde su layout conocido (CONTEO_BASE) porque antes los
+        //   espacios tenían otros productos. Si una reposición cambió el producto de un espacio, las ventas
+        //   anteriores a ese cambio se atribuyen al producto que estaba.
+        //   Comprar = ritmo × días de cobertura + capacidad de las máquinas − (bodega + stock estimado en máquinas)
+        //   Lotes del mismo producto (mismo SKU base y mismo nombre, o confirmados en MISMO_PRODUCTO) se suman.
+        // ============================================
+        const COBERTURAS_COMPRA = [7, 14, 21, 28];
+        const COBERTURA_COMPRA_DEFECTO = 14;   // Sebastián compra cada ~2 semanas
+        const VENTANA_COMPRA = 28;
+        const MISMO_PRODUCTO = {               // lotes confirmados como el mismo producto aunque cambie el nombre
+            'GB-BARRA-PROTEIN-NARANJA-L2': 'GB-BARRA-PROTEIN-NARANJA',
+            'GB-COCA-COLA-ORIGINAL-L2': 'GB-COCA-COLA-ORIGINAL',
+            'GB-BROUNICHOC-L2': 'GB-BROUNICHOC'             // "Braunichoc" en bodega: mismo producto (confirmado 08-10-2026)
+        };
+        window.setCoberturaCompra = function(v) { state.compraDias = Math.max(1, parseInt(v, 10) || COBERTURA_COMPRA_DEFECTO); render(); };
+        window.toggleCompraVerTodos = function() { state.compraVerTodos = !state.compraVerTodos; render(); };
+
+        function nombreBase(n) { return String(n || '').split('·')[0].trim(); }
+        function normNombre(n) { return nombreBase(n).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+        function claveProducto(p) {
+            if (!p) return '';
+            const sku = String(p.sku);
+            if (MISMO_PRODUCTO[sku]) return MISMO_PRODUCTO[sku];
+            const base = sku.replace(/-L\d+$/, '');
+            if (base !== sku) {
+                const madre = state.inventario.find(x => String(x.sku) === base);
+                if (madre && normNombre(madre.nombre_producto) === normNombre(p.nombre_producto)) return base;
+            }
+            return sku;
+        }
+
+        // Producto vendido según el espacio y la hora (usa los cambios registrados en reposiciones)
+        function crearSkuHistorico() {
+            const cambios = {};   // maquina_id → espacio → [{ hasta, sku }] ordenado por hora
+            state.reposiciones.forEach(r => {
+                (Array.isArray(r.detalle) ? r.detalle : []).forEach(x => {
+                    if (!x.sku_nuevo || String(x.sku_nuevo) === String(x.sku)) return;
+                    const m = cambios[r.maquina_id] = cambios[r.maquina_id] || {};
+                    (m[normEspacio(x.espacio)] = m[normEspacio(x.espacio)] || []).push({ hasta: r.fecha_hora_local + ':59', sku: String(x.sku) });
+                });
+            });
+            Object.values(cambios).forEach(m => Object.values(m).forEach(l => l.sort((a, b) => a.hasta.localeCompare(b.hasta))));
+            return (maquina, espacio, ts) => {
+                const l = cambios[maquina.id] && cambios[maquina.id][espacio];
+                if (l) { const c = l.find(c => ts <= c.hasta); if (c) return c.sku; }
+                const a = getAsignacion(maquina.id, espacio);
+                return a ? String(a.sku) : null;
+            };
+        }
+
+        function tsAFecha(ts) {
+            const m = String(ts || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+            return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) : null;
+        }
+
+        function getSugerenciaCompra(diasCobertura) {
+            const ultima = getUltimaVenta();
+            const hastaTs = ultima ? String(ultima).replace(' ', 'T').substring(0, 19) : '';
+            const hastaD = tsAFecha(hastaTs);
+            const porClave = {};
+            const fila = clave => porClave[clave] = porClave[clave] || { clave, lotes: [], bodega: 0, maquinas: {}, espacios: {}, enMaq: 0, capacidad: 0, vendidas: {}, ritmo: 0 };
+            state.inventario.forEach(p => { const f = fila(claveProducto(p)); f.lotes.push(p); f.bodega += Number(p.cantidad_actual) || 0; });
+
+            // Stock estimado y capacidad en máquinas
+            state.maquinas.forEach(m => {
+                const ventas = getConfigConteo(m) ? getVentasDesdeConteo(m) : {};
+                state.asignaciones.filter(a => String(a.maquina_id) === String(m.id)).forEach(a => {
+                    const p = state.inventario.find(x => String(x.sku) === String(a.sku));
+                    const f = fila(p ? claveProducto(p) : String(a.sku));
+                    const q = stockEstimadoEspacio(m, a, ventas);
+                    f.enMaq += q;
+                    f.maquinas[m.nombre] = (f.maquinas[m.nombre] || 0) + q;
+                    (f.espacios[m.nombre] = f.espacios[m.nombre] || []).push(normEspacio(a.espacio));
+                    f.capacidad += capacidadEspacio(m, a.espacio) || Number(a.cantidad_asignada) || 0;
+                });
+            });
+
+            // Ritmo de venta por máquina (desde el inicio de su layout conocido)
+            const ventana = { desde: '', hasta: hastaTs, dias: {} };
+            if (hastaD) {
+                const desdeD = new Date(hastaD.getTime() - VENTANA_COMPRA * 86400000);
+                const skuDe = crearSkuHistorico();
+                const inicioPorMaq = {};
+                state.maquinas.forEach(m => {
+                    const fijo = CONTEO_BASE[String(m.nombre || '').trim().toLowerCase()];
+                    const layout = tsAFecha(maxBaseConfig(fijo));
+                    const ini = layout && layout > desdeD ? layout : desdeD;
+                    inicioPorMaq[m.id] = ini;
+                    ventana.dias[m.nombre] = Math.max(0, (hastaD - ini) / 86400000);
+                });
+                ventana.desde = `${desdeD.getFullYear()}-${pad2(desdeD.getMonth() + 1)}-${pad2(desdeD.getDate())}`;
+                state.ventas.forEach(v => {
+                    if (!esVentaValida(v)) return;
+                    const m = getMaquinaDeVenta(v);
+                    if (!m || !inicioPorMaq[m.id]) return;
+                    const ts = tsVenta(v);
+                    const d = tsAFecha(ts);
+                    if (!d || d <= inicioPorMaq[m.id] || ts > hastaTs) return;
+                    const sku = skuDe(m, normEspacio(v.espacio), ts);
+                    if (!sku) return;
+                    const p = state.inventario.find(x => String(x.sku) === sku);
+                    const f = fila(p ? claveProducto(p) : sku);
+                    f.vendidas[m.nombre] = (f.vendidas[m.nombre] || 0) + unidadesDeVenta(v);
+                });
+            }
+
+            const filas = Object.values(porClave).map(f => {
+                f.ritmo = Object.entries(f.vendidas).reduce((t, [maq, u]) => t + (ventana.dias[maq] >= 1 ? u / ventana.dias[maq] : 0), 0);
+                const rep = f.lotes.find(p => String(p.sku) === f.clave) || f.lotes[0] || null;
+                const disponible = f.bodega + f.enMaq;
+                const demanda = f.capacidad > 0 ? f.ritmo * diasCobertura : 0;   // sin espacio asignado no se repone
+                const comprar = Math.max(0, Math.ceil(demanda + f.capacidad - disponible));
+                const vences = f.lotes.filter(p => (Number(p.cantidad_actual) || 0) > 0).map(p => diasParaVencer(p.fecha_caducidad)).filter(d => d !== null);
+                const venceEn = vences.length ? Math.min(...vences) : null;
+                const alcanza = f.ritmo > 0 ? disponible / f.ritmo : null;
+                return {
+                    ...f, nombre: rep ? nombreBase(rep.nombre_producto) : f.clave, familia: rep ? (rep.familia || '') : '',
+                    disponible, demanda, comprar, alcanza, venceEn,
+                    venceAntes: venceEn !== null && alcanza !== null && venceEn < alcanza,
+                    costoUnit: Math.max(0, ...f.lotes.map(p => Number(p.precio_compra_unitario) || 0)),
+                    totalVendidas: Object.values(f.vendidas).reduce((t, u) => t + u, 0)
+                };
+            }).filter(f => f.lotes.length || f.capacidad);
+            filas.sort((a, b) => (b.comprar > 0) - (a.comprar > 0) || (a.alcanza ?? 1e9) - (b.alcanza ?? 1e9) || String(a.nombre).localeCompare(String(b.nombre)));
+            return { filas, ventana };
+        }
+
+        window.copiarListaCompra = async function() {
+            const { filas } = getSugerenciaCompra(state.compraDias || COBERTURA_COMPRA_DEFECTO);
+            const porFam = {};
+            filas.filter(f => f.comprar > 0).forEach(f => { (porFam[f.familia || 'Otros'] = porFam[f.familia || 'Otros'] || []).push(`${f.nombre}: ${f.comprar}`); });
+            const texto = `Compra GO BOX (${state.compraDias || COBERTURA_COMPRA_DEFECTO} días)\n` + Object.entries(porFam).map(([fam, l]) => `\n${fam}\n- ${l.join('\n- ')}`).join('\n');
+            try { await navigator.clipboard.writeText(texto); alert('✅ Lista copiada. Puedes pegarla en WhatsApp o en una nota.'); }
+            catch (e) { prompt('Copia la lista:', texto); }
+        };
+
+        function renderQueComprar() {
+            const dias = state.compraDias || COBERTURA_COMPRA_DEFECTO;
+            const { filas, ventana } = getSugerenciaCompra(dias);
+            const aComprar = filas.filter(f => f.comprar > 0);
+            const visibles = state.compraVerTodos ? filas : aComprar;
+            const totalU = aComprar.reduce((t, f) => t + f.comprar, 0);
+            const diasTxt = Object.entries(ventana.dias).map(([m, d]) => `${esc(m)} ${d >= 1 ? d.toFixed(1).replace('.', ',') : '0'} días`).join(' · ');
+            const fmt1 = n => n.toFixed(1).replace('.', ',');
+            const pocosDias = Object.values(ventana.dias).some(d => d < 7);
+            return `
+                <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
+                    <div class="flex flex-wrap items-center justify-between gap-3 mb-2">
+                        <h3 class="font-bold text-lg">🛒 Qué comprar</h3>
+                        <div class="flex flex-wrap items-center gap-2 text-sm">
+                            <label for="compraDias" class="text-gray-600">Para cubrir</label>
+                            <select id="compraDias" onchange="window.setCoberturaCompra(this.value)" class="border p-2 rounded">
+                                ${COBERTURAS_COMPRA.map(d => `<option value="${d}" ${d === dias ? 'selected' : ''}>${d} días</option>`).join('')}
+                            </select>
+                            <button onclick="window.copiarListaCompra()" ${aComprar.length ? '' : 'disabled'} class="px-3 py-2 rounded border border-gray-300 font-semibold disabled:opacity-50">Copiar lista</button>
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-700 mb-1"><strong>${aComprar.length}</strong> producto${aComprar.length === 1 ? '' : 's'} · <strong>${totalU}</strong> unidades </p>
+                    <p class="text-xs text-gray-500 mb-2">Ritmo medido con las ventas hasta ${ventana.hasta ? fmtFecha(ventana.hasta) + ' ' + ventana.hasta.substring(11, 16) : '—'} (${diasTxt || 'sin ventas'}). Cada máquina se mide desde su layout actual.</p>
+                    ${pocosDias ? `<div class="mb-4 p-3 bg-amber-50 border border-amber-300 rounded text-sm text-amber-900">⚠️ Hay menos de 7 días de ventas para medir el ritmo: la sugerencia es aproximada. Importa las ventas de PayScan más recientes antes de comprar.</div>` : '<div class="mb-2"></div>'}
+                    ${visibles.length ? `
+                        <table class="tabla-resp w-full text-sm">
+                            <thead><tr class="text-left text-xs uppercase text-gray-500 border-b">
+                                <th class="py-2">Producto</th><th class="py-2 text-right">Vende/día</th><th class="py-2 text-right">Bodega</th>
+                                <th class="py-2">En máquinas</th><th class="py-2 text-right">Alcanza</th><th class="py-2 text-right">Comprar</th>
+                            </tr></thead>
+                            <tbody>
+                                ${visibles.map(f => `
+                                    <tr class="border-b ${f.comprar ? '' : 'text-gray-500'}">
+                                        <td class="py-2"><div class="font-semibold">${esc(f.nombre)}</div><div class="text-xs text-gray-500">${esc(f.familia)}${f.lotes.length > 1 ? ` · ${f.lotes.length} lotes` : ''}${f.venceAntes ? ` · <span class="text-red-700 font-semibold">vence en ${f.venceEn} días, antes de venderse</span>` : ''}</div></td>
+                                        <td class="py-2 text-right tabular-nums">${f.ritmo ? fmt1(f.ritmo) : '0'}</td>
+                                        <td class="py-2 text-right tabular-nums">${f.bodega}</td>
+                                        <td class="py-2">${state.maquinas.filter(m => f.espacios[m.nombre]).map(m => { const es = f.espacios[m.nombre].sort((a, b) => Number(a) - Number(b)); return `<div class="whitespace-nowrap"><span class="font-semibold">${esc(m.nombre)}:</span> <span class="tabular-nums">${f.maquinas[m.nombre]} u</span> <span class="text-xs text-gray-500">en ${es.length} espacio${es.length === 1 ? '' : 's'} (${es.join(', ')})</span></div>`; }).join('') || '<span class="text-gray-400">sin espacio</span>'}</td>
+                                        <td class="py-2 text-right tabular-nums ${f.alcanza !== null && f.alcanza < dias ? 'text-red-700 font-semibold' : ''}">${f.alcanza === null ? '—' : f.alcanza >= 99 ? '+99 d' : `${Math.floor(f.alcanza)} d`}</td>
+                                        <td class="py-2 text-right tabular-nums font-bold text-base">${f.comprar || '—'}</td>
+                                    </tr>`).join('')}
+                            </tbody>
+                        </table>` : '<p class="text-sm text-gray-500">✓ Con lo que hay en bodega y máquinas alcanza para el período elegido.</p>'}
+                    <div class="flex flex-wrap items-center justify-between gap-2 mt-3">
+                        <p class="text-xs text-gray-500">Comprar = lo que se venderá en ${dias} días + lo que cabe en sus espacios − (bodega + lo que hay en máquinas). Unidades en máquinas = estimado (cargado − vendido). Si un espacio no tiene capacidad configurada se usa la última cantidad cargada. Los productos sin espacio asignado no se sugieren.</p>
+                        <button onclick="window.toggleCompraVerTodos()" class="text-sm font-semibold text-blue-700 underline">${state.compraVerTodos ? 'Ver solo lo que hay que comprar' : `Ver también los que alcanzan (${filas.length - aComprar.length})`}</button>
+                    </div>
+                </div>`;
+        }
+
+        // ============================================
         // PRÓXIMOS A VENCER (semáforo). Usa la fecha de caducidad de inventario_bodega (una fecha por producto).
         // Solo lista productos que tengan unidades (bodega + máquinas estimado). Umbrales en días:
         //   rojo: vencido o ≤ 7 · amarillo: ≤ 30 · verde: ≤ 60
@@ -3811,6 +4001,8 @@
                         <div class="col-span-2 md:col-span-1 bg-white p-4 rounded-2xl shadow-sm"><div class="text-xs font-semibold text-gray-500 uppercase">Valor del inventario a costo</div><div class="text-2xl font-bold">$${clp(valorCosto)}</div><div class="text-xs text-gray-500">según precio de compra</div></div>
                     </div>
 
+                    ${renderQueComprar()}
+
                     <div class="bg-white p-4 rounded-lg shadow space-y-3">
                         <input type="text" id="searchInput" placeholder="🔍 Buscar por SKU o nombre..." value="${esc(state.searchQuery)}" oninput="window.updateSearchQuery(this.value)" class="w-full border p-3 rounded">
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -4629,7 +4821,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v8 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v9 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
