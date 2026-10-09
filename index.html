@@ -426,15 +426,29 @@
             return t.replace(/^0+(?=.)/, '');
         }
 
-        // Una venta puede traer maquina_id o solo el serial del PayScan
+        // v13: la máquina se identifica por el Serial POS (lector de tarjetas). El Serial AMIT solo se usa
+        // si ninguna máquina tiene ese POS y exactamente UNA máquina tiene ese AMIT (desde oct-2026 varias
+        // máquinas comparten AMIT).
+        function maquinaPorSeriales(serialPos, serialAmit) {
+            const pos = serialPos !== undefined && serialPos !== null && String(serialPos).trim() !== '' ? normSerial(serialPos) : '';
+            if (pos) {
+                const m = state.maquinas.find(m => m.serial_pos && normSerial(m.serial_pos) === pos);
+                if (m) return m;
+            }
+            if (serialAmit !== undefined && serialAmit !== null && String(serialAmit).trim() !== '') {
+                const cand = state.maquinas.filter(m => normSerial(m.serial_amit) === normSerial(serialAmit));
+                if (cand.length === 1 && !(pos && cand[0].serial_pos)) return cand[0];
+            }
+            return null;
+        }
+
+        // Una venta puede traer maquina_id o solo los seriales del PayScan
         function getMaquinaDeVenta(v) {
             if (v.maquina_id) {
                 const m = state.maquinas.find(m => String(m.id) === String(v.maquina_id));
                 if (m) return m;
             }
-            if (v.serial_amit !== undefined && v.serial_amit !== null && v.serial_amit !== '') {
-                return state.maquinas.find(m => normSerial(m.serial_amit) === normSerial(v.serial_amit)) || null;
-            }
+            if (v.serial_pos || v.serial_amit !== undefined) return maquinaPorSeriales(v.serial_pos, v.serial_amit);
             return null;
         }
 
@@ -454,7 +468,7 @@
         }
 
         function emptyMachine() {
-            return { nombre: '', serial_amit: '', ubicacion: '', total_filas: 6, total_columnas: 10, productos_por_slot: 1, capacidadPorEspacio: buildCapacidades(6, 10, 1) };
+            return { nombre: '', serial_pos: '', serial_amit: '', ubicacion: '', total_filas: 6, total_columnas: 10, productos_por_slot: 1, capacidadPorEspacio: buildCapacidades(6, 10, 1) };
         }
 
         function emptyAssignment() {
@@ -470,8 +484,8 @@
         function loadMockData() {
             console.log('📋 Llenando datos de ejemplo...');
             state.maquinas = [
-                { id: '550e8400-e29b-41d4-a716-446655440000', nombre: 'Parque Lomas', ubicacion: 'Concepción - Lomas de San Andrés', serial_amit: '0', total_filas: 6, total_columnas: 10, productos_por_slot: 1 },
-                { id: '6ba7b810-9dad-11d1-80b4-00c04fd430c8', nombre: 'Edificio New', ubicacion: 'Concepción - Centro', serial_amit: '0000000000440864', total_filas: 6, total_columnas: 8, productos_por_slot: 1 }
+                { id: '550e8400-e29b-41d4-a716-446655440000', nombre: 'Parque Lomas', ubicacion: 'Concepción - Lomas de San Andrés', serial_amit: '0', serial_pos: '1500032797', total_filas: 6, total_columnas: 10, productos_por_slot: 1 },
+                { id: '6ba7b810-9dad-11d1-80b4-00c04fd430c8', nombre: 'Edificio New', ubicacion: 'Concepción - Centro', serial_amit: '0000000000440864', serial_pos: '1500075489', total_filas: 6, total_columnas: 8, productos_por_slot: 1 }
             ];
             state.inventario = [
                 { id: '1', sku: 'SKU001', nombre_producto: 'Energizante Red Bull', familia: 'Bebidas', precio_compra_unitario: 2000, precio_venta_unitario: 3500, cantidad_actual: 45, fecha_compra: '2025-01-01', fecha_caducidad: '2025-12-31', proveedor: 'Distribuidora Centro' },
@@ -566,7 +580,7 @@
                     const { data, error } = await conReintento(async () => {
                         const r = await supabaseClient
                         .from('ventas_payscan')
-                        .select('id_transaccion, fecha, hora, timestamp_completo, serial_amit, maquina_id, espacio, monto_venta, comision, neto_comision, resultado_transaccion, metodo_pago')
+                        .select('id_transaccion, fecha, hora, timestamp_completo, serial_amit, serial_pos, maquina_id, espacio, monto_venta, comision, neto_comision, resultado_transaccion, metodo_pago')
                         .eq('resultado_transaccion', 'APPROVED')
                         .order('timestamp_completo', { ascending: false })
                         .range(from, from + 999);
@@ -1184,7 +1198,7 @@
         };
 
         window.updateNewMachine = function(field, value) {
-            const esTexto = field === 'nombre' || field === 'serial_amit' || field === 'ubicacion';
+            const esTexto = field === 'nombre' || field === 'serial_amit' || field === 'serial_pos' || field === 'ubicacion';
             if (esTexto) {
                 // Campos de texto: no hace falta re-renderizar (evita perder el foco al escribir)
                 state.newMachine[field] = value;
@@ -1212,10 +1226,10 @@
             if (!puedeEscribir()) return;
             console.log('📌 DEBUG: Intentando agregar máquina con datos:', state.newMachine);
             
-            if (!state.newMachine.nombre || !state.newMachine.serial_amit || !state.newMachine.ubicacion) {
+            if (!state.newMachine.nombre || !state.newMachine.serial_pos || !state.newMachine.ubicacion) {
                 const campos_vacios = [];
                 if (!state.newMachine.nombre) campos_vacios.push('Nombre');
-                if (!state.newMachine.serial_amit) campos_vacios.push('Serial AMIT');
+                if (!state.newMachine.serial_pos) campos_vacios.push('Serial POS');
                 if (!state.newMachine.ubicacion) campos_vacios.push('Ubicación');
                 alert('⚠️ Campos requeridos faltantes: ' + campos_vacios.join(', '));
                 console.log('❌ Campos vacíos:', campos_vacios);
@@ -1225,7 +1239,8 @@
             try {
                 const machineData = {
                     nombre: state.newMachine.nombre,
-                    serial_amit: state.newMachine.serial_amit,
+                    serial_amit: state.newMachine.serial_amit || '',
+                    serial_pos: String(state.newMachine.serial_pos).trim(),
                     ubicacion: state.newMachine.ubicacion,
                     total_filas: parseInt(state.newMachine.total_filas) || 6,
                     total_columnas: parseInt(state.newMachine.total_columnas) || 10,
@@ -1263,7 +1278,9 @@
                     filas: machine.total_filas || 6,
                     columnas: machine.total_columnas || 10,
                     productoPorSlot: machine.productos_por_slot || 1,
-                    capacidades: { ...getCapacidades(machine) }
+                    capacidades: { ...getCapacidades(machine) },
+                    serial_pos: machine.serial_pos || '',
+                    serial_amit: machine.serial_amit || ''
                 };
                 render();
             }
@@ -1306,8 +1323,14 @@
             return t;
         }
 
+        window.setSerialConfig = function(campo, valor) { state.machineConfig[campo] = String(valor || '').trim(); };
+
         window.saveMachineConfig = async function() {
             if (!puedeEscribir()) return;
+            const pos = state.machineConfig.serial_pos || '';
+            if (!pos) { alert('⚠️ Falta el Serial POS (número del lector de tarjetas).'); return; }
+            const repetida = state.maquinas.find(m => String(m.id) !== String(state.editingMachine) && m.serial_pos && normSerial(m.serial_pos) === normSerial(pos));
+            if (repetida) { alert(`⚠️ El Serial POS ${pos} ya está asignado a ${repetida.nombre}.`); return; }
             // Solo se guardan capacidades de espacios que existen en la grilla actual
             const caps = {};
             for (let f = 1; f <= state.machineConfig.filas; f++)
@@ -1320,12 +1343,14 @@
                 total_filas: state.machineConfig.filas,
                 total_columnas: state.machineConfig.columnas,
                 total_espacios: state.machineConfig.filas * state.machineConfig.columnas,
-                capacidad_por_espacio: JSON.stringify(caps)
+                capacidad_por_espacio: JSON.stringify(caps),
+                serial_pos: pos,
+                serial_amit: state.machineConfig.serial_amit || ''
             }).eq('id', state.editingMachine);
 
             if (error) { console.error('Error saving:', error); alert('❌ Error al guardar: ' + error.message); }
             else { 
-                guardarHistorial('ACTUALIZAR_CONFIG_MAQUINA', `ID: ${state.editingMachine} · ${Object.keys(caps).length} espacios con capacidad (${Object.values(caps).reduce((a, b) => a + b, 0)} unidades)`);
+                guardarHistorial('ACTUALIZAR_CONFIG_MAQUINA', `ID: ${state.editingMachine} · POS ${pos} · ${Object.keys(caps).length} espacios con capacidad (${Object.values(caps).reduce((a, b) => a + b, 0)} unidades)`);
                 alert('✅ Configuración guardada'); 
                 state.editingMachine = null; 
                 await fetchMaquinas(); 
@@ -1622,7 +1647,7 @@
             const porMaquina = {};
             getVentasPeriodo().forEach(v => {
                 const maquina = getMaquinaDeVenta(v);
-                const nombre = maquina?.nombre || (v.serial_amit ? `Serial ${normSerial(v.serial_amit)}` : 'Desconocida');
+                const nombre = maquina?.nombre || (v.serial_pos ? `POS ${normSerial(v.serial_pos)}` : v.serial_amit ? `AMIT ${normSerial(v.serial_amit)}` : 'Desconocida');
                 porMaquina[nombre] = (porMaquina[nombre] || 0) + parseFloat(v.monto_venta || 0);
             });
             return porMaquina;
@@ -3151,7 +3176,7 @@
             marca_tarjeta: ['marca tarjeta'],
             resultado_dispensado: ['resultado dispensado']
         };
-        const PAYSCAN_OBLIGATORIAS = ['id_transaccion', 'fecha', 'monto_venta', 'producto_codigo', 'serial_amit'];
+        const PAYSCAN_OBLIGATORIAS = ['id_transaccion', 'fecha', 'monto_venta', 'producto_codigo', 'serial_pos'];
 
         function normHeader(h) {
             return String(h ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -3221,14 +3246,15 @@
             const fecha = parseFechaImport(get('fecha'));
             const hora = parseHoraImport(get('hora'));
             const serial = textoONull(get('serial_amit'));
-            const maquina = serial !== null ? state.maquinas.find(m => normSerial(m.serial_amit) === normSerial(serial)) : null;
+            const serialPos = textoONull(get('serial_pos'));
+            const maquina = maquinaPorSeriales(serialPos, serial);
             return {
                 id_transaccion: textoONull(get('id_transaccion')),
                 fecha,
                 hora,
                 timestamp_completo: fecha ? `${fecha}T${hora}` : null,
                 serial_amit: serial,
-                serial_pos: textoONull(get('serial_pos')),
+                serial_pos: serialPos,
                 maquina_id: maquina ? String(maquina.id) : null,
                 espacio: decodeEspacioPayscan(get('producto_codigo')) || null,
                 producto_codigo: textoONull(get('producto_codigo')),
@@ -3319,8 +3345,8 @@
                 const sinMaquina = new Set();
                 aprobadas.forEach(f => {
                     const m = f.maquina_id ? state.maquinas.find(x => String(x.id) === f.maquina_id) : null;
-                    const nombre = m ? m.nombre : `Serial ${normSerial(f.serial_amit)} (sin máquina)`;
-                    if (!m) sinMaquina.add(f.serial_amit);
+                    const nombre = m ? m.nombre : `POS ${f.serial_pos || '?'} (sin máquina)`;
+                    if (!m) sinMaquina.add(`POS ${f.serial_pos || '?'} · AMIT ${normSerial(f.serial_amit || '')}`);
                     porMaquina[nombre] = porMaquina[nombre] || { count: 0, monto: 0 };
                     porMaquina[nombre].count++;
                     porMaquina[nombre].monto += f.monto_venta;
@@ -3418,7 +3444,7 @@
                                         </tbody>
                                     </table>
                                 ` : ''}
-                                ${p.sinMaquina.length ? `<div class="p-3 bg-orange-50 border border-orange-300 rounded text-sm text-orange-900">⚠️ Serial AMIT sin máquina registrada: <strong>${p.sinMaquina.map(esc).join(', ')}</strong>. Se importan igual; créala en <em>Máquinas</em> con ese serial y se asociarán solas.</div>` : ''}
+                                ${p.sinMaquina.length ? `<div class="p-3 bg-orange-50 border border-orange-300 rounded text-sm text-orange-900">⚠️ Ventas de un lector sin máquina registrada: <strong>${p.sinMaquina.map(esc).join(', ')}</strong>. Se importan igual sin máquina; anota ese Serial POS en <em>Máquinas → Editar</em> y vuelve a importar el archivo para asignarlas.</div>` : ''}
                                 ${p.sinEspacio ? `<div class="p-3 bg-orange-50 border border-orange-300 rounded text-sm text-orange-900">⚠️ ${p.sinEspacio} transacciones sin espacio reconocible en la columna "Producto".</div>` : ''}
                                 <div class="flex gap-3">
                                     <button onclick="window.confirmarImport()" ${!p.nuevas.length || state.importLoading ? 'disabled' : ''} class="flex-1 bg-green-600 text-white py-3 rounded hover:bg-green-700 font-bold disabled:opacity-50 disabled:cursor-not-allowed">
@@ -4599,9 +4625,15 @@
                                 </div>
 
                                 <div>
-                                    <label class="block text-sm font-bold text-gray-700 mb-2">🔐 Serial AMIT <span class="text-red-600">*</span></label>
+                                    <label class="block text-sm font-bold text-gray-700 mb-2">💳 Serial POS <span class="text-red-600">*</span></label>
+                                    <input type="text" inputmode="numeric" placeholder="Ej: 1500075489" value="${esc(state.newMachine.serial_pos)}" oninput="window.updateNewMachine('serial_pos', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono">
+                                    <p class="text-xs text-gray-500 mt-1">Número del lector de tarjetas (columna "Serial pos" del reporte de PayScan). Con esto se sabe de qué máquina es cada venta.</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-bold text-gray-700 mb-2">🔐 Serial AMIT <span class="text-gray-400 font-normal">(opcional)</span></label>
                                     <input type="text" placeholder="Ej: 0000000000440864" value="${esc(state.newMachine.serial_amit)}" oninput="window.updateNewMachine('serial_amit', this.value)" class="w-full border p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono">
-                                    <p class="text-xs text-gray-500 mt-1">Código del PayScan asociado a la máquina (se usa para cruzar las ventas)</p>
+                                    <p class="text-xs text-gray-500 mt-1">Ya no identifica la máquina (puede repetirse entre máquinas).</p>
                                 </div>
 
                                 <div>
@@ -4700,6 +4732,10 @@
                                             </div>
                                             
                                             <div class="space-y-3">
+                                                <div class="flex justify-between items-center p-3 rounded ${maquina.serial_pos ? 'bg-gray-50' : 'bg-red-50 border border-red-200'}">
+                                                    <span class="text-sm font-medium">Serial POS</span>
+                                                    <span class="font-bold font-mono ${maquina.serial_pos ? '' : 'text-red-700'}">${maquina.serial_pos ? esc(maquina.serial_pos) : 'falta (Editar)'}</span>
+                                                </div>
                                                 <div class="flex justify-between items-center p-3 bg-gray-50 rounded">
                                                     <span class="text-sm font-medium">Bandejas × Posiciones</span>
                                                     <span class="font-bold">${maquina.total_filas || 6} × ${maquina.total_columnas || 10}</span>
@@ -4728,6 +4764,16 @@
                         <div class="bg-white p-6 rounded-lg shadow">
                             <h3 class="text-xl font-bold mb-6">Configurar Máquina</h3>
                             <div class="space-y-6">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-blue-50 border border-blue-200 rounded">
+                                    <label class="block text-sm font-bold text-gray-700">💳 Serial POS <span class="text-red-600">*</span>
+                                        <input type="text" inputmode="numeric" id="cfgSerialPos" value="${esc(state.machineConfig.serial_pos || '')}" oninput="window.setSerialConfig('serial_pos', this.value)" placeholder="Ej: 1500075489" class="mt-1 w-full border p-3 rounded font-mono font-normal">
+                                        <span class="block text-xs font-normal text-gray-500 mt-1">Columna "Serial pos" del reporte de PayScan. Identifica de qué máquina es cada venta.</span>
+                                    </label>
+                                    <label class="block text-sm font-bold text-gray-700">🔐 Serial AMIT <span class="text-gray-400 font-normal">(opcional)</span>
+                                        <input type="text" id="cfgSerialAmit" value="${esc(state.machineConfig.serial_amit || '')}" oninput="window.setSerialConfig('serial_amit', this.value)" class="mt-1 w-full border p-3 rounded font-mono font-normal">
+                                        <span class="block text-xs font-normal text-gray-500 mt-1">Puede repetirse entre máquinas; solo se usa como respaldo.</span>
+                                    </label>
+                                </div>
                                 <div>
                                     <label class="block text-sm font-bold mb-2">Bandejas</label>
                                     <div class="flex items-center gap-3">
@@ -5129,7 +5175,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v12 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v13 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
