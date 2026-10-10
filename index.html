@@ -2063,8 +2063,12 @@
         window.repoEditar = function(repId) {
             const rep = state.reposiciones.find(r => String(r.id) === String(repId));
             if (!repoEsEditable(rep)) { alert('Esta reposición ya no se puede editar (su bodega ya se actualizó o hay una reposición posterior).'); return; }
+            // v16: el borrador guardado en el celular solo se usa si la reposición no cambió desde entonces
+            // (antes un borrador viejo podía pisar correcciones hechas después).
+            const firma = vmHash(JSON.stringify(rep.detalle || []) + '|' + (rep.notas || ''));
             let d = null;
             try { d = JSON.parse(localStorage.getItem('gobox_repo_edicion_' + rep.id) || 'null'); } catch (e) {}
+            if (d && d.firma !== firma) { d = null; try { localStorage.removeItem('gobox_repo_edicion_' + rep.id); } catch (e) {} }
             if (!d || String(d.editId) !== String(rep.id)) {
                 const filas = {};
                 (rep.detalle || []).forEach(x => {
@@ -2076,7 +2080,7 @@
                     if (x.origen_alt && x.origen_alt.sku) { o.altSku = String(x.origen_alt.sku); o.altCant = Number(x.origen_alt.cantidad) || 0; o.altAbierto = true; }
                     filas[e] = o;
                 });
-                d = { maquinaId: String(rep.maquina_id), editId: String(rep.id), fecha: rep.fecha_hora_local, notas: rep.notas || '', filas, sacado: {} };
+                d = { maquinaId: String(rep.maquina_id), editId: String(rep.id), firma, fecha: rep.fecha_hora_local, notas: rep.notas || '', filas, sacado: {} };
             }
             state.repoMaquina = String(rep.maquina_id);
             state.repoDraft = d;
@@ -2114,6 +2118,17 @@
             const fecha = d.fecha;
             const editando = !!d.editId;
             const baseActual = editando ? '' : maxBaseConfig(getConfigConteo(maquina));
+            if (editando && !state.demoMode) {
+                const { data: actual } = await supabaseClient.from('reposiciones').select('id, detalle, notas, bodega_aplicada_at').eq('id', d.editId).maybeSingle();
+                if (actual) {
+                    const i = state.reposiciones.findIndex(r => String(r.id) === String(d.editId));
+                    if (vmHash(JSON.stringify(actual.detalle || []) + '|' + (actual.notas || '')) !== d.firma) {
+                        state.repoError = 'Esta reposición cambió desde que empezaste a editarla (otra corrección). Sal sin guardar y vuelve a abrir "Editar reposición" para ver la versión actual.';
+                        if (i >= 0) state.reposiciones[i] = { ...state.reposiciones[i], ...actual };
+                        render(); return;
+                    }
+                }
+            }
             if (editando && !repoEsEditable(state.reposiciones.find(r => String(r.id) === String(d.editId)))) state.repoError = 'Esta reposición ya no se puede editar: su bodega ya se actualizó o hay una reposición posterior.';
             else if (!RE_FECHA_MIN.test(fecha || '')) state.repoError = 'Indica la fecha y hora en que terminaste la reposición.';
             else if (fecha > ahoraLocalMin()) state.repoError = 'La hora de la reposición no puede ser futura.';
@@ -5277,7 +5292,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v15 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v16 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
