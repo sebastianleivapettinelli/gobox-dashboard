@@ -1806,7 +1806,8 @@
         //    reposición pasa a ser el nuevo conteo base de TODA la máquina (función registrar_reposicion).
         //  - La bodega NO se descuenta sola: después de guardar, el paso 4 "Actualizar bodega" resta lo que
         //    entró a la máquina y suma lo que volvió (v8, función aplicar_bodega_reposicion).
-        //  - Cambiar producto: el espacio queda con otro SKU y precio (v8, registrar_reposicion v2).
+        //  - Reemplazar producto (antes "Cambiar producto"): el espacio queda con otro SKU y precio (v8).
+        //  - Agregué de otro lote o producto (antes "Saqué de otro producto", v12): origen_alt; v15 lo propone solo.
         //  - El borrador se respalda en este navegador para no perder lo anotado si se recarga la página.
         // ============================================
         const pad2 = n => String(n).padStart(2, '0');
@@ -1914,18 +1915,31 @@
                         altAbierto: !!o.altAbierto,
                         altSku: o.altSku && String(o.altSku) !== String(cambio ? o.skuNuevo : a.sku) ? String(o.altSku) : null,
                         altCantPedida: Number.isInteger(o.altCant) ? o.altCant : null,
+                        altApagado: o.altAuto === false,
                         costo: prod ? (Number(prod.precio_compra_unitario) || 0) : 0,
                         dias: prod ? diasParaVencer(prod.fecha_caducidad) : null,
                         diasEntra: entra ? diasParaVencer(entra.fecha_caducidad) : null
                     };
                 }).map(f => {
-                    const prodAlt = f.altSku ? state.inventario.find(p => String(p.sku) === f.altSku) || null : null;
-                    const bodegaPropia = (() => { const p = state.inventario.find(p => String(p.sku) === f.skuEntra); return p ? Number(p.cantidad_actual) || 0 : 0; })();
+                    const propio = state.inventario.find(p => String(p.sku) === f.skuEntra) || null;
+                    const bodegaPropia = propio ? Number(propio.cantidad_actual) || 0 : 0;
+                    const necesita = f.listo ? f.llevar : f.planLlevar;
+                    // v15: si el lote del espacio no alcanza, se propone otro lote del MISMO producto con stock
+                    // (el que vence primero). Se puede quitar o cambiar.
+                    let altSku = f.altSku, altAuto = false, autoCant = 0;
+                    if (!altSku && !f.altApagado && propio && necesita > bodegaPropia) {
+                        const clave = claveProducto(propio);
+                        const lote = state.inventario
+                            .filter(p => String(p.sku) !== f.skuEntra && claveProducto(p) === clave && (Number(p.cantidad_actual) || 0) > 0)
+                            .sort((a, b) => String(a.fecha_caducidad || '9999').localeCompare(String(b.fecha_caducidad || '9999')))[0];
+                        if (lote) { altSku = String(lote.sku); altAuto = true; autoCant = Math.min(necesita - bodegaPropia, Number(lote.cantidad_actual) || 0); }
+                    }
+                    const prodAlt = altSku ? state.inventario.find(p => String(p.sku) === altSku) || null : null;
                     const defecto = Math.max(1, f.planLlevar - bodegaPropia);
-                    const pedida = f.altSku ? (f.altCantPedida ?? defecto) : 0;
-                    return { ...f, prodAlt, nombreAlt: prodAlt ? prodAlt.nombre_producto : (f.altSku || ''),
-                        altCant: f.altSku ? Math.min(pedida, f.listo ? f.llevar : f.planLlevar) : 0,
-                        altPlan: f.altSku ? Math.min(pedida, f.planLlevar) : 0 };
+                    const pedida = altSku ? (altAuto ? autoCant : (f.altCantPedida ?? defecto)) : 0;
+                    return { ...f, altSku, altAuto, prodAlt, nombreAlt: prodAlt ? prodAlt.nombre_producto : (altSku || ''),
+                        altCant: altSku ? Math.min(pedida, f.listo ? f.llevar : f.planLlevar) : 0,
+                        altPlan: altSku ? Math.min(pedida, f.planLlevar) : 0 };
                 });
         }
 
@@ -1993,8 +2007,8 @@
             const d = state.repoDraft;
             if (!d) return;
             const o = d.filas[espacio] = d.filas[espacio] || {};
-            if (!sku) { delete o.altSku; delete o.altCant; o.altAbierto = false; }
-            else { o.altSku = String(sku); delete o.altCant; }
+            if (!sku) { delete o.altSku; delete o.altCant; o.altAbierto = false; o.altAuto = false; }
+            else { o.altSku = String(sku); delete o.altCant; delete o.altAuto; }
             state.repoError = '';
             repoRespaldar();
             render();
@@ -2459,7 +2473,7 @@
                                     ${sacar.map(s => `
                                         <tr class="border-b ${d.sacado[s.sku] || !s.llevar ? 'opacity-50' : ''}">
                                             <td class="py-2"><input type="checkbox" id="repoSac-${esc(s.sku)}" ${d.sacado[s.sku] ? 'checked' : ''} onchange="window.repoSacado(${esc(JSON.stringify(s.sku))}, this.checked)" class="w-5 h-5"></td>
-                                            <td class="py-2 font-semibold">${esc(s.nombre)}${s.reusa ? `<div class="text-xs font-normal text-gray-600">${s.reusa} se reutilizan de otro espacio</div>` : ''}${s.bodega < s.llevar && s.otros.length ? `<div class="text-xs font-normal text-amber-800">No alcanza. Hay ${s.otros.map(p => `${Number(p.cantidad_actual) || 0} de ${esc(nombreBase(p.nombre_producto))}`).join(' · ')}: usa "Saqué de otro producto" en el espacio.</div>` : ''}</td>
+                                            <td class="py-2 font-semibold">${esc(s.nombre)}${s.reusa ? `<div class="text-xs font-normal text-gray-600">${s.reusa} se reutilizan de otro espacio</div>` : ''}${s.bodega < s.llevar && s.otros.length ? `<div class="text-xs font-normal text-amber-800">No alcanza. Hay ${s.otros.map(p => `${Number(p.cantidad_actual) || 0} de ${esc(nombreBase(p.nombre_producto))}`).join(' · ')}: se propone solo en el espacio ("Agregué de otro lote o producto").</div>` : ''}</td>
                                             <td class="py-2 text-gray-600">${s.espacios.map(esc).join(', ')}</td>
                                             <td class="py-2 text-right font-bold tabular-nums">${s.llevar}</td>
                                             <td class="py-2 text-right tabular-nums ${s.bodega < s.llevar ? 'text-red-700 font-bold' : ''}">${s.bodega}${s.bodega < s.llevar ? ' ⚠️' : ''}</td>
@@ -2476,7 +2490,7 @@
                             <h3 class="font-bold text-lg">2. En la máquina</h3>
                             <span class="text-sm text-gray-600">${revisados} de ${filas.length} espacios repuestos</span>
                         </div>
-                        <p class="text-xs text-gray-500 mb-4">Marca <strong>Repuse</strong> en cada espacio que llenaste: se sugiere llenarlo hasta la capacidad y puedes ajustar <strong>Dejé</strong>. Los espacios sin marcar quedan como los encontraste y no descuentan bodega. Si contaste un espacio, corrige <strong>Encontré</strong>. Para poner otro producto usa <strong>Cambiar producto</strong>.</p>
+                        <p class="text-xs text-gray-500 mb-4">Marca <strong>Repuse</strong> en cada espacio que llenaste: se sugiere llenarlo hasta la capacidad y puedes ajustar <strong>Dejé</strong>. Los espacios sin marcar quedan como los encontraste y no descuentan bodega. Si contaste un espacio, corrige <strong>Encontré</strong>. Si agregaste unidades de otro lote, usa <strong>Agregué de otro lote o producto</strong> (se propone solo si el lote del espacio no alcanza). <strong>Reemplazar producto</strong> es solo si sacaste los que había.</p>
                         <div class="divide-y">
                             ${filas.map(f => `
                                 <div class="py-3 grid grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[auto_minmax(0,1fr)_auto] gap-x-3 gap-y-2 items-center ${f.listo ? 'bg-green-50 -mx-2 px-2 rounded' : ''}">
@@ -2490,8 +2504,8 @@
                                             ${f.cambio ? chipVence(f.diasEntra) : ''}
                                             ${f.llevar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">entran ${f.llevar}</span>` : ''}
                                             ${f.retirar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-200 text-gray-800">salen ${f.retirar}</span>` : ''}
-                                            <button type="button" onclick="window.repoSet('${f.e}', 'cambiando', ${f.abierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.cambio ? 'Editar cambio' : 'Cambiar producto'}</button>
-                                            <button type="button" onclick="window.repoSet('${f.e}', 'altAbierto', ${f.altAbierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.altSku ? ((f.altCant || f.altPlan) ? `${f.altCant || f.altPlan} de ${esc(nombreBase(f.nombreAlt))}` : `Desde ${esc(nombreBase(f.nombreAlt))}`) : 'Saqué de otro producto'}</button>
+                                            <button type="button" onclick="window.repoSet('${f.e}', 'cambiando', ${f.abierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.cambio ? 'Editar reemplazo' : 'Reemplazar producto'}</button>
+                                            <button type="button" onclick="window.repoSet('${f.e}', 'altAbierto', ${f.altAbierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.altSku ? `${f.altAuto ? 'Sugerido: ' : ''}${(f.altCant || f.altPlan) ? `${f.altCant || f.altPlan} de ${esc(f.nombreAlt)}` : `desde ${esc(f.nombreAlt)}`}` : 'Agregué de otro lote o producto'}</button>
                                         </div>
                                         ${f.abierto || f.cambio ? `
                                             <div class="mt-2 p-3 bg-blue-50 border border-blue-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
@@ -2508,12 +2522,12 @@
                                                     <button type="button" onclick="window.repoSetProducto('${f.e}', '')" class="px-3 py-2 rounded border border-gray-300 text-sm font-semibold bg-white">Deshacer</button>
                                                 ` : ''}
                                                 <p class="text-xs text-gray-600 sm:col-span-3">${f.cambio
-                                                    ? `Precio anterior $${clp(f.precioActual)}. Encontré = unidades de ${esc(f.nombre)} que sacas; Dejé = unidades de ${esc(f.nombreNuevo)}. Cambia también el precio en la máquina.`
-                                                    : 'Elige el producto que quedará en este espacio.'}</p>
+                                                    ? `Precio anterior $${clp(f.precioActual)}. Encontré = unidades de ${esc(f.nombre)} que <strong>sacaste</strong>; Dejé = unidades de ${esc(f.nombreNuevo)}. Cambia también el precio en la máquina.${f.prodNuevo && f.prod && claveProducto(f.prodNuevo) === claveProducto(f.prod) && f.encontrado > 0 ? ' <span class="text-amber-800 font-semibold">Es otro lote del mismo producto: si los que había siguen en la máquina, usa "Agregué de otro lote o producto" en vez de reemplazar.</span>' : ''}`
+                                                    : 'Úsalo solo si <strong>sacaste</strong> los que había y pusiste otro producto. Si los que había siguen, usa "Agregué de otro lote o producto".'}</p>
                                             </div>` : ''}
-                                        ${f.altAbierto || f.altSku ? `
+                                        ${f.altAbierto || (f.altSku && (!f.altAuto || f.listo)) ? `
                                             <div class="mt-2 p-3 bg-amber-50 border border-amber-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
-                                                <label class="text-xs text-gray-700 font-semibold min-w-0">Lo saqué de
+                                                <label class="text-xs text-gray-700 font-semibold min-w-0">Las unidades nuevas salieron de
                                                     <select id="repoAlt-${f.e}" onchange="window.repoSetAlt('${f.e}', this.value)" class="block w-full max-w-full min-w-0 border p-2 rounded text-base font-normal bg-white">
                                                         <option value="">— Solo de ${esc(nombreBase(f.nombreNuevo || f.nombre))} —</option>
                                                         ${opcionesProducto.filter(p => String(p.sku) !== f.skuEntra).map(p => `<option value="${esc(p.sku)}" ${String(p.sku) === f.altSku ? 'selected' : ''}>${esc(p.nombre_producto)} · bodega ${Number(p.cantidad_actual) || 0}</option>`).join('')}
@@ -2526,8 +2540,8 @@
                                                     <button type="button" onclick="window.repoSetAlt('${f.e}', '')" class="px-3 py-2 rounded border border-gray-300 text-sm font-semibold bg-white">Quitar</button>
                                                 ` : ''}
                                                 <p class="text-xs text-gray-600 sm:col-span-3">${f.altSku
-                                                    ? (!(f.listo ? f.llevar : f.planLlevar) ? 'Todavía no entra ninguna unidad en este espacio: marca Repuse o escribe Dejé.' : `De las ${f.listo ? f.llevar : f.planLlevar} que entran, ${f.altCant || f.altPlan} se descuentan de ${esc(nombreBase(f.nombreAlt))} y el resto de ${esc(nombreBase(f.nombreNuevo || f.nombre))}. El espacio sigue asignado a ${esc(nombreBase(f.nombreNuevo || f.nombre))}.`)
-                                                    : 'Úsalo si no quedaba del producto del espacio y pusiste otro lote o sabor parecido.'}</p>
+                                                    ? (!(f.listo ? f.llevar : f.planLlevar) ? 'Todavía no entra ninguna unidad en este espacio: marca Repuse o escribe Dejé.' : `De las ${f.listo ? f.llevar : f.planLlevar} que entran, ${f.altCant || f.altPlan} se descuentan de <strong>${esc(f.nombreAlt)}</strong> y ${Math.max(0, (f.listo ? f.llevar : f.planLlevar) - (f.altCant || f.altPlan))} de <strong>${esc(f.nombreNuevo || f.nombre)}</strong>. El espacio sigue asignado a ${esc(f.nombreNuevo || f.nombre)}.`)
+                                                    : 'Úsalo cuando los que había siguen en la máquina y agregaste unidades de otro lote o de un producto parecido.'}${f.altAuto ? ' <strong>Sugerido</strong> porque el lote del espacio no alcanza en bodega; si no es así, cámbialo o quítalo.' : ''}</p>
                                             </div>` : ''}
                                     </div>
                                     <div class="col-start-2 sm:col-start-3 flex gap-2">
@@ -5263,7 +5277,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v14 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v15 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
