@@ -1846,19 +1846,34 @@
         function repoRespaldar() {
             const d = state.repoDraft;
             if (!d) return;
-            try { localStorage.setItem(repoClave(d.maquinaId), JSON.stringify(d)); } catch (e) {}
+            try { localStorage.setItem(d.editId ? 'gobox_repo_edicion_' + d.editId : repoClave(d.maquinaId), JSON.stringify(d)); } catch (e) {}
         }
 
         // Fila de la hoja de ruta. Si en la reposición se cambia el producto del espacio (o.skuNuevo):
         //   Encontré = unidades del producto ANTERIOR (todas salen de la máquina)
         //   Dejé     = unidades del producto NUEVO
+        function repoFuenteEdicion(maquina, draft) {
+            const rep = state.reposiciones.find(r => String(r.id) === String(draft.editId));
+            return (rep && Array.isArray(rep.detalle) ? rep.detalle : []).map(x => {
+                const actual = state.asignaciones.find(a => String(a.id) === String(x.asignacion_id));
+                return {
+                    id: x.asignacion_id, maquina_id: maquina.id, espacio: x.espacio, sku: x.sku,
+                    cantidad_asignada: Number(x.cargado_anterior) || 0,
+                    precio_venta_espacio: x.precio_anterior != null ? x.precio_anterior : (actual ? actual.precio_venta_espacio : 0),
+                    _base: x.base_anterior || null
+                };
+            });
+        }
+
         function repoFilas(maquina, draft) {
-            const baseDe = e => getBaseConteo(maquina, e);
+            const fuente = draft.editId ? repoFuenteEdicion(maquina, draft) : state.asignaciones.filter(a => String(a.maquina_id) === String(maquina.id));
+            const basesEd = {};
+            if (draft.editId) fuente.forEach(a => { basesEd[normEspacio(a.espacio)] = a._base; });
+            const baseDe = draft.editId ? (e => basesEd[e] || null) : (e => getBaseConteo(maquina, e));
             const fecha = RE_FECHA_MIN.test(draft.fecha || '') ? draft.fecha : ahoraLocalMin();
             const vend = unidadesVendidasEntre(maquina, baseDe, fecha);
             const prodDe = sku => state.inventario.find(p => String(p.sku) === String(sku)) || null;
-            return state.asignaciones
-                .filter(a => String(a.maquina_id) === String(maquina.id))
+            return fuente
                 .sort((x, y) => Number(normEspacio(x.espacio)) - Number(normEspacio(y.espacio)))
                 .map(a => {
                     const e = normEspacio(a.espacio);
@@ -2023,6 +2038,50 @@
             render();
         };
 
+        // v14: editar una reposición guardada mientras su bodega no se haya actualizado y sea la última de la máquina
+        function repoEsEditable(rep) {
+            if (!rep || rep.bodega_aplicada_at) return false;
+            const ult = state.reposiciones.filter(r => String(r.maquina_id) === String(rep.maquina_id))
+                .sort((a, b) => String(b.fecha_hora_local).localeCompare(String(a.fecha_hora_local)))[0];
+            return !!ult && String(ult.id) === String(rep.id);
+        }
+
+        window.repoEditar = function(repId) {
+            const rep = state.reposiciones.find(r => String(r.id) === String(repId));
+            if (!repoEsEditable(rep)) { alert('Esta reposición ya no se puede editar (su bodega ya se actualizó o hay una reposición posterior).'); return; }
+            let d = null;
+            try { d = JSON.parse(localStorage.getItem('gobox_repo_edicion_' + rep.id) || 'null'); } catch (e) {}
+            if (!d || String(d.editId) !== String(rep.id)) {
+                const filas = {};
+                (rep.detalle || []).forEach(x => {
+                    const e = normEspacio(x.espacio);
+                    const enc = Number(x.encontrado) || 0, fin = Number(x.final) || 0;
+                    const o = { encontrado: enc };
+                    if (x.sku_nuevo && String(x.sku_nuevo) !== String(x.sku)) { o.skuNuevo = String(x.sku_nuevo); o.precioNuevo = Number(x.precio_nuevo) || undefined; o.cambiando = true; }
+                    if (fin !== enc || o.skuNuevo) { o.final = fin; o.listo = true; }
+                    if (x.origen_alt && x.origen_alt.sku) { o.altSku = String(x.origen_alt.sku); o.altCant = Number(x.origen_alt.cantidad) || 0; o.altAbierto = true; }
+                    filas[e] = o;
+                });
+                d = { maquinaId: String(rep.maquina_id), editId: String(rep.id), fecha: rep.fecha_hora_local, notas: rep.notas || '', filas, sacado: {} };
+            }
+            state.repoMaquina = String(rep.maquina_id);
+            state.repoDraft = d;
+            state.repoError = '';
+            state.repoBodegaRepId = '';
+            render();
+            try { window.scrollTo({ top: 0 }); } catch (e) {}
+        };
+
+        window.repoCancelarEdicion = function() {
+            const d = state.repoDraft;
+            if (!d || !d.editId) return;
+            if (!confirm('¿Salir sin guardar los cambios de esta reposición?')) return;
+            try { localStorage.removeItem('gobox_repo_edicion_' + d.editId); } catch (e) {}
+            state.repoDraft = repoCargarBorrador(d.maquinaId);
+            state.repoError = '';
+            render();
+        };
+
         window.repoDescartar = function() {
             const d = state.repoDraft;
             if (!d) return;
@@ -2039,8 +2098,10 @@
             if (!maquina || !d || state.repoGuardando) return;
             state.repoError = '';
             const fecha = d.fecha;
-            const baseActual = maxBaseConfig(getConfigConteo(maquina));
-            if (!RE_FECHA_MIN.test(fecha || '')) state.repoError = 'Indica la fecha y hora en que terminaste la reposición.';
+            const editando = !!d.editId;
+            const baseActual = editando ? '' : maxBaseConfig(getConfigConteo(maquina));
+            if (editando && !repoEsEditable(state.reposiciones.find(r => String(r.id) === String(d.editId)))) state.repoError = 'Esta reposición ya no se puede editar: su bodega ya se actualizó o hay una reposición posterior.';
+            else if (!RE_FECHA_MIN.test(fecha || '')) state.repoError = 'Indica la fecha y hora en que terminaste la reposición.';
             else if (fecha > ahoraLocalMin()) state.repoError = 'La hora de la reposición no puede ser futura.';
             else if (baseActual && fecha <= baseActual) state.repoError = `La hora debe ser posterior al conteo base actual (${fmtBase(baseActual)}).`;
             else if (!state.demoMode && !state.reposicionesOk) state.repoError = 'Falta crear la tabla de reposiciones en Supabase (reposiciones_v1.sql).';
@@ -2058,7 +2119,7 @@
             const repuestos = filas.filter(f => f.listo).length;
             const cambios = filas.filter(f => f.cambio);
             const alternos = filas.filter(f => f.altSku && f.altCant > 0);
-            const msg = `Guardar reposición de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
+            const msg = `${editando ? 'Guardar cambios en la reposición' : 'Guardar reposición'} de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
                 + `• Entran: ${llevar} u · Salen: ${retirar} u\n`
                 + `• Diferencia contra lo esperado: ${dif > 0 ? '+' : ''}${dif} u\n`
                 + (cambios.length ? `• Cambios de producto:\n${cambios.map(f => `   ${f.e}: ${f.nombre} → ${f.nombreNuevo} a $${clp(f.precioNuevo)}`).join('\n')}\n  Recuerda cambiar también el precio en la máquina.\n` : '')
@@ -2082,7 +2143,26 @@
             render();
             try {
                 let nuevoId;
-                if (state.demoMode) {
+                if (editando) {
+                    if (state.demoMode) {
+                        const rep = state.reposiciones.find(r => String(r.id) === String(d.editId));
+                        detalle.forEach(x => {
+                            const a = state.asignaciones.find(a => String(a.id) === x.asignacion_id);
+                            if (!a) return;
+                            a.cantidad_asignada = x.final;
+                            if (x.sku_nuevo) { a.sku = x.sku_nuevo; a.precio_venta_espacio = x.precio_nuevo; }
+                            else { a.sku = x.sku; }
+                        });
+                        rep.detalle = detalle; rep.notas = d.notas;
+                    } else {
+                        if (typeof supabaseClient.rpc !== 'function') throw new Error('Supabase no disponible (sin conexión)');
+                        const { error } = await supabaseClient.rpc('editar_reposicion', {
+                            p_reposicion_id: String(d.editId), p_detalle: detalle, p_notas: d.notas || null, p_usuario: state.currentUser || null
+                        });
+                        if (error) throw error;
+                    }
+                    nuevoId = d.editId;
+                } else if (state.demoMode) {
                     nuevoId = 'demo-rep-' + Date.now();
                     state.reposiciones.unshift({ id: nuevoId, maquina_id: maquina.id, fecha_hora_local: fecha, detalle, notas: d.notas, usuario: state.currentUser || 'demo', created_at: new Date().toISOString(), bodega_aplicada_at: null });
                     detalle.forEach(x => {
@@ -2100,12 +2180,12 @@
                     if (error) throw error;
                     nuevoId = data;
                 }
-                guardarHistorial('REPOSICION', `${maquina.nombre} ${fmtBase(fecha)}: entran ${llevar} u, salen ${retirar} u, diferencia ${dif > 0 ? '+' : ''}${dif} u en ${filas.length} espacios${cambios.length ? ` · cambios: ${cambios.map(f => `${f.e} ${f.sku}→${f.skuNuevo}`).join(', ')}` : ''}`);
-                try { localStorage.removeItem(repoClave(maquina.id)); } catch (e) {}
+                guardarHistorial(editando ? 'EDITAR_REPOSICION' : 'REPOSICION', `${maquina.nombre} ${fmtBase(fecha)}: entran ${llevar} u, salen ${retirar} u, diferencia ${dif > 0 ? '+' : ''}${dif} u en ${filas.length} espacios${cambios.length ? ` · cambios: ${cambios.map(f => `${f.e} ${f.sku}→${f.skuNuevo}`).join(', ')}` : ''}`);
+                try { localStorage.removeItem(editando ? 'gobox_repo_edicion_' + d.editId : repoClave(maquina.id)); } catch (e) {}
                 if (!state.demoMode) await Promise.all([fetchAsignaciones(), fetchReposiciones()]);
-                state.repoDraft = repoNuevoBorrador(maquina.id);
+                state.repoDraft = editando ? repoCargarBorrador(maquina.id) : repoNuevoBorrador(maquina.id);
                 state.repoBodegaRepId = nuevoId ? String(nuevoId) : '';
-                alert('✅ Reposición guardada. El stock de la máquina parte de nuevo desde esta hora.\n\nAbajo puedes actualizar la bodega con lo que entró y salió de la máquina.');
+                alert(editando ? '✅ Cambios guardados. Revisa el paso 4 y actualiza la bodega cuando esté todo bien.' : '✅ Reposición guardada. El stock de la máquina parte de nuevo desde esta hora.\n\nAbajo puedes actualizar la bodega con lo que entró y salió de la máquina.');
             } catch (err) {
                 console.error('Error guardando reposición:', err);
                 state.repoError = 'No se pudo guardar: ' + (err && err.message ? err.message : 'error desconocido') + '. Lo anotado sigue en este borrador.';
@@ -2247,6 +2327,7 @@
                         ? `<p class="mt-3 text-sm text-green-800 font-semibold">✓ Bodega actualizada el ${new Date(rep.bodega_aplicada_at).toLocaleString('es-CL')}.</p>`
                         : `<div class="mt-3 flex flex-wrap gap-2">
                                <button onclick="window.repoAplicarBodega(${esc(JSON.stringify(String(rep.id)))})" ${state.repoBodegaGuardando || !movs.length ? 'disabled' : ''} class="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold disabled:opacity-60">${state.repoBodegaGuardando ? 'Actualizando…' : 'Actualizar bodega'}</button>
+                               ${repoEsEditable(rep) ? `<button onclick="window.repoEditar(${esc(JSON.stringify(String(rep.id)))})" class="px-6 py-3 rounded-lg font-semibold border border-gray-300 text-gray-700">Editar reposición</button>` : ''}
                            </div>
                            <p class="text-xs text-gray-500 mt-2">Se hace una sola vez por reposición. Si prefieres corregir la bodega a mano, puedes dejarlo pendiente.</p>`}
                 </div>`;
@@ -2341,28 +2422,32 @@
                             ⚠️ Falta crear la tabla de reposiciones en Supabase (archivo <strong>reposiciones_v1.sql</strong>). Puedes usar la hoja de ruta, pero todavía no se puede guardar.
                         </div>` : ''}
 
-                    ${repBodega && !repBodega.bodega_aplicada_at ? renderBodegaReposicion(repBodega) : ''}
+                    ${d.editId ? `
+                        <div class="p-4 bg-blue-50 border-2 border-blue-300 rounded-lg text-sm text-blue-900 flex flex-wrap items-center justify-between gap-3">
+                            <div><strong>Editando la reposición del ${fmtBase(d.fecha)}.</strong> Corrige lo que necesites y guarda los cambios. La bodega todavía no se modifica.</div>
+                            <button onclick="window.repoCancelarEdicion()" class="px-4 py-2 rounded-lg border border-blue-400 bg-white font-semibold">Salir sin guardar</button>
+                        </div>` : (repBodega && !repBodega.bodega_aplicada_at ? renderBodegaReposicion(repBodega) : '')}
 
                     <div class="bg-white p-4 sm:p-6 rounded-lg shadow space-y-4">
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <label class="block text-sm font-bold text-gray-700">Hora en que terminaste
                                 <div class="mt-1 flex gap-2">
-                                    <input type="datetime-local" id="repoFecha" value="${esc(d.fecha)}" onchange="window.repoSetGeneral('fecha', this.value)" class="flex-1 min-w-0 border p-2 rounded font-normal">
-                                    <button type="button" onclick="window.repoAhora()" class="px-3 rounded border border-gray-300 text-sm font-semibold">Ahora</button>
+                                    <input type="datetime-local" id="repoFecha" value="${esc(d.fecha)}" ${d.editId ? 'disabled' : ''} onchange="window.repoSetGeneral('fecha', this.value)" class="flex-1 min-w-0 border p-2 rounded font-normal disabled:bg-gray-100">
+                                    ${d.editId ? '' : `<button type="button" onclick="window.repoAhora()" class="px-3 rounded border border-gray-300 text-sm font-semibold">Ahora</button>`}
                                 </div>
                             </label>
                             <label class="block text-sm font-bold text-gray-700 md:col-span-2">Notas (opcional)
                                 <input type="text" id="repoNotas" value="${esc(d.notas)}" onchange="window.repoSetGeneral('notas', this.value)" placeholder="Ej: espacio 23 trabado, se retiraron 2 vencidos" class="mt-1 w-full border p-2 rounded font-normal">
                             </label>
                         </div>
-                        <div class="text-xs text-gray-600">Conteo base actual: <strong>${baseActual ? fmtBase(baseActual) : 'sin conteo'}</strong>${cfg && cfg.reposicion ? ' (última reposición registrada)' : ''} · Ventas importadas hasta: <strong>${ultimaVenta ? fmtFecha(ultimaVenta) + ' ' + String(ultimaVenta).substring(11, 16) : 'sin datos'}</strong></div>
+                        <div class="text-xs text-gray-600">${d.editId ? 'Lo esperado se calcula con el conteo anterior a esta reposición' : `Conteo base actual: <strong>${baseActual ? fmtBase(baseActual) : 'sin conteo'}</strong>${cfg && cfg.reposicion ? ' (última reposición registrada)' : ''}`} · Ventas importadas hasta: <strong>${ultimaVenta ? fmtFecha(ultimaVenta) + ' ' + String(ultimaVenta).substring(11, 16) : 'sin datos'}</strong></div>
                         ${ventasAtrasadas ? `
                             <div class="p-3 bg-amber-50 border border-amber-300 rounded text-sm text-amber-900">
                                 ⚠️ Las ventas importadas llegan hasta antes de la hora de la reposición. Lo esperado puede salir más alto y aparecer como "faltan". Importa las ventas de PayScan antes de contar; si no alcanzas, guarda igual: el historial se recalcula cuando importes.
                             </div>` : ''}
                     </div>
 
-                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow">
+                    <div class="bg-white p-4 sm:p-6 rounded-lg shadow" ${d.editId ? 'hidden' : ''}>
                         <div class="flex flex-wrap items-baseline justify-between gap-2 mb-3">
                             <h3 class="font-bold text-lg">1. Sacar de bodega</h3>
                             <span class="text-sm text-gray-600">${totSacar} unidades · ${sacar.filter(s => s.llevar).length} productos</span>
@@ -2467,8 +2552,10 @@
                         </div>
                         ${state.repoError ? `<div class="p-3 bg-red-50 border border-red-300 rounded text-sm text-red-800" role="alert">${esc(state.repoError)}</div>` : ''}
                         <div class="flex flex-wrap gap-2">
-                            <button onclick="window.repoGuardar()" ${state.repoGuardando ? 'disabled' : ''} class="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold disabled:opacity-60">${state.repoGuardando ? 'Guardando…' : 'Guardar reposición'}</button>
-                            <button onclick="window.repoDescartar()" class="px-6 py-3 rounded-lg font-semibold border border-gray-300 text-gray-700">Descartar borrador</button>
+                            <button onclick="window.repoGuardar()" ${state.repoGuardando ? 'disabled' : ''} class="bg-blue-600 text-white px-6 py-3 rounded-lg font-bold disabled:opacity-60">${state.repoGuardando ? 'Guardando…' : d.editId ? 'Guardar cambios' : 'Guardar reposición'}</button>
+                            ${d.editId
+                                ? `<button onclick="window.repoCancelarEdicion()" class="px-6 py-3 rounded-lg font-semibold border border-gray-300 text-gray-700">Salir sin guardar</button>`
+                                : `<button onclick="window.repoDescartar()" class="px-6 py-3 rounded-lg font-semibold border border-gray-300 text-gray-700">Descartar borrador</button>`}
                         </div>
                         <p class="text-xs text-gray-500">Lo anotado se respalda en este navegador hasta que guardes o descartes.</p>
                     </div>
@@ -2502,6 +2589,7 @@
                                             </table>
                                         </div>` : '<p class="text-sm text-gray-500 mt-2">Todos los espacios cuadraron.</p>'}
                                     ${pendiente ? `<button onclick="window.repoVerBodega(${esc(JSON.stringify(String(r.id)))})" class="mt-2 text-sm font-semibold text-blue-700 underline">Actualizar bodega de esta reposición</button>` : ''}
+                                    ${repoEsEditable(r) ? `<button onclick="window.repoEditar(${esc(JSON.stringify(String(r.id)))})" class="mt-2 ml-3 text-sm font-semibold text-blue-700 underline">Editar reposición</button>` : ''}
                                 </details>`;
                         }).join('')}</div>` : '<p class="text-sm text-gray-500">Todavía no hay reposiciones registradas para esta máquina.</p>'}
                     </div>
@@ -5175,7 +5263,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v13 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v14 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
