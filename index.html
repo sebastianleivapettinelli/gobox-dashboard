@@ -1836,7 +1836,12 @@
         }
 
         function repoClave(maquinaId) { return 'gobox_repo_borrador_' + maquinaId; }
-        function repoNuevoBorrador(maquinaId) { return { maquinaId: String(maquinaId), fecha: ahoraLocalMin(), notas: '', filas: {}, sacado: {} }; }
+        function repoNuevoBorrador(maquinaId) { return { maquinaId: String(maquinaId), fecha: '', fechaManual: false, notas: '', filas: {}, sacado: {} }; }
+        // v17: la hora de término es la del momento de guardar, salvo que se escriba a mano
+        // (antes quedaba la hora en que se abrió la pantalla y se restaban ventas hechas durante la reposición).
+        function repoFechaEfectiva(d) {
+            return (d && (d.editId || d.fechaManual) && RE_FECHA_MIN.test(d.fecha || '')) ? d.fecha : ahoraLocalMin();
+        }
         function repoCargarBorrador(maquinaId) {
             try {
                 const d = JSON.parse(localStorage.getItem(repoClave(maquinaId)) || 'null');
@@ -1871,7 +1876,7 @@
             const basesEd = {};
             if (draft.editId) fuente.forEach(a => { basesEd[normEspacio(a.espacio)] = a._base; });
             const baseDe = draft.editId ? (e => basesEd[e] || null) : (e => getBaseConteo(maquina, e));
-            const fecha = RE_FECHA_MIN.test(draft.fecha || '') ? draft.fecha : ahoraLocalMin();
+            const fecha = repoFechaEfectiva(draft);
             const vend = unidadesVendidasEntre(maquina, baseDe, fecha);
             const prodDe = sku => state.inventario.find(p => String(p.sku) === String(sku)) || null;
             return fuente
@@ -2036,6 +2041,7 @@
             const d = state.repoDraft;
             if (!d) return;
             d[campo] = String(valor || '');
+            if (campo === 'fecha') d.fechaManual = !!d[campo];
             state.repoError = '';
             repoRespaldar();
             render();
@@ -2115,7 +2121,7 @@
             const d = state.repoDraft;
             if (!maquina || !d || state.repoGuardando) return;
             state.repoError = '';
-            const fecha = d.fecha;
+            const fecha = repoFechaEfectiva(d);
             const editando = !!d.editId;
             const baseActual = editando ? '' : maxBaseConfig(getConfigConteo(maquina));
             if (editando && !state.demoMode) {
@@ -2148,7 +2154,8 @@
             const repuestos = filas.filter(f => f.listo).length;
             const cambios = filas.filter(f => f.cambio);
             const alternos = filas.filter(f => f.altSku && f.altCant > 0);
-            const msg = `${editando ? 'Guardar cambios en la reposición' : 'Guardar reposición'} de ${maquina.nombre} (${fmtBase(fecha)})\n\n`
+            const msg = `${editando ? 'Guardar cambios en la reposición' : 'Guardar reposición'} de ${maquina.nombre}\n\n`
+                + (editando ? '' : `• Hora de término: ${fmtBase(fecha)}${d.fechaManual ? ' (escrita a mano)' : ' (ahora)'}. Si no es la hora en que terminaste, cancela y cámbiala arriba.\n`)
                 + `• Entran: ${llevar} u · Salen: ${retirar} u\n`
                 + `• Diferencia contra lo esperado: ${dif > 0 ? '+' : ''}${dif} u\n`
                 + (cambios.length ? `• Cambios de producto:\n${cambios.map(f => `   ${f.e}: ${f.nombre} → ${f.nombreNuevo} a $${clp(f.precioNuevo)}`).join('\n')}\n  Recuerda cambiar también el precio en la máquina.\n` : '')
@@ -2421,7 +2428,8 @@
             const cfg = getConfigConteo(maquina);
             const baseActual = maxBaseConfig(cfg);
             const ultimaVenta = getUltimaVenta();
-            const ventasAtrasadas = RE_FECHA_MIN.test(d.fecha || '') && (!ultimaVenta || String(ultimaVenta).replace(' ', 'T').substring(0, 16) < d.fecha);
+            const fechaEf = repoFechaEfectiva(d);
+            const ventasAtrasadas = !ultimaVenta || String(ultimaVenta).replace(' ', 'T').substring(0, 16) < fechaEf;
             const totLlevar = filas.reduce((t, f) => t + f.llevar, 0);
             const totRetirar = filas.reduce((t, f) => t + f.retirar, 0);
             const totSacar = sacar.reduce((t, s) => t + s.llevar, 0);
@@ -2461,9 +2469,10 @@
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <label class="block text-sm font-bold text-gray-700">Hora en que terminaste
                                 <div class="mt-1 flex gap-2">
-                                    <input type="datetime-local" id="repoFecha" value="${esc(d.fecha)}" ${d.editId ? 'disabled' : ''} onchange="window.repoSetGeneral('fecha', this.value)" class="flex-1 min-w-0 border p-2 rounded font-normal disabled:bg-gray-100">
-                                    ${d.editId ? '' : `<button type="button" onclick="window.repoAhora()" class="px-3 rounded border border-gray-300 text-sm font-semibold">Ahora</button>`}
+                                    <input type="datetime-local" id="repoFecha" value="${esc(fechaEf)}" ${d.editId ? 'disabled' : ''} onchange="window.repoSetGeneral('fecha', this.value)" class="flex-1 min-w-0 border p-2 rounded font-normal disabled:bg-gray-100">
+                                    ${d.editId ? '' : d.fechaManual ? `<button type="button" onclick="window.repoSetGeneral('fecha', '')" class="px-3 rounded border border-gray-300 text-sm font-semibold">Usar al guardar</button>` : ''}
                                 </div>
+                                <span class="block text-xs font-normal text-gray-500 mt-1">${d.editId ? 'La hora de una reposición guardada no se cambia aquí.' : d.fechaManual ? 'Hora escrita a mano.' : 'Se usa la hora del momento en que aprietes Guardar. Cámbiala solo si terminaste antes.'}</span>
                             </label>
                             <label class="block text-sm font-bold text-gray-700 md:col-span-2">Notas (opcional)
                                 <input type="text" id="repoNotas" value="${esc(d.notas)}" onchange="window.repoSetGeneral('notas', this.value)" placeholder="Ej: espacio 23 trabado, se retiraron 2 vencidos" class="mt-1 w-full border p-2 rounded font-normal">
@@ -5292,7 +5301,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v16 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v17 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
