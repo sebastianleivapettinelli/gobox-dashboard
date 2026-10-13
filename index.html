@@ -1879,7 +1879,7 @@
             const fecha = repoFechaEfectiva(draft);
             const vend = unidadesVendidasEntre(maquina, baseDe, fecha);
             const prodDe = sku => state.inventario.find(p => String(p.sku) === String(sku)) || null;
-            return fuente
+            const filas = fuente
                 .sort((x, y) => Number(normEspacio(x.espacio)) - Number(normEspacio(y.espacio)))
                 .map(a => {
                     const e = normEspacio(a.espacio);
@@ -1925,27 +1925,38 @@
                         dias: prod ? diasParaVencer(prod.fecha_caducidad) : null,
                         diasEntra: entra ? diasParaVencer(entra.fecha_caducidad) : null
                     };
-                }).map(f => {
-                    const propio = state.inventario.find(p => String(p.sku) === f.skuEntra) || null;
-                    const bodegaPropia = propio ? Number(propio.cantidad_actual) || 0 : 0;
-                    const necesita = f.listo ? f.llevar : f.planLlevar;
-                    // v15: si el lote del espacio no alcanza, se propone otro lote del MISMO producto con stock
-                    // (el que vence primero). Se puede quitar o cambiar.
-                    let altSku = f.altSku, altAuto = false, autoCant = 0;
-                    if (!altSku && !f.altApagado && propio && necesita > bodegaPropia) {
-                        const clave = claveProducto(propio);
-                        const lote = state.inventario
-                            .filter(p => String(p.sku) !== f.skuEntra && claveProducto(p) === clave && (Number(p.cantidad_actual) || 0) > 0)
-                            .sort((a, b) => String(a.fecha_caducidad || '9999').localeCompare(String(b.fecha_caducidad || '9999')))[0];
-                        if (lote) { altSku = String(lote.sku); altAuto = true; autoCant = Math.min(necesita - bodegaPropia, Number(lote.cantidad_actual) || 0); }
-                    }
-                    const prodAlt = altSku ? state.inventario.find(p => String(p.sku) === altSku) || null : null;
-                    const defecto = Math.max(1, f.planLlevar - bodegaPropia);
-                    const pedida = altSku ? (altAuto ? autoCant : (f.altCantPedida ?? defecto)) : 0;
-                    return { ...f, altSku, altAuto, prodAlt, nombreAlt: prodAlt ? prodAlt.nombre_producto : (altSku || ''),
-                        altCant: altSku ? Math.min(pedida, f.listo ? f.llevar : f.planLlevar) : 0,
-                        altPlan: altSku ? Math.min(pedida, f.planLlevar) : 0 };
                 });
+            // v18: la bodega se reparte entre los espacios en orden. Si el lote del espacio no alcanza:
+            //  - se propone el lote del mismo producto que vence primero (se puede cambiar o quitar), y
+            //  - se marca la falta para mostrar la alarma en el espacio.
+            const disp = {};
+            state.inventario.forEach(p => { disp[String(p.sku)] = Number(p.cantidad_actual) || 0; });
+            return filas.map(f => {
+                const propio = state.inventario.find(p => String(p.sku) === f.skuEntra) || null;
+                const necesita = f.listo ? f.llevar : f.planLlevar;
+                const usaPropio = Math.min(necesita, Math.max(0, disp[f.skuEntra] || 0));
+                const falta = necesita - usaPropio;
+                let altSku = f.altSku, altAuto = false, autoCant = 0;
+                if (!altSku && !f.altApagado && propio && falta > 0) {
+                    const clave = claveProducto(propio);
+                    const lote = state.inventario
+                        .filter(p => String(p.sku) !== f.skuEntra && claveProducto(p) === clave && (disp[String(p.sku)] || 0) > 0)
+                        .sort((a, b) => String(a.fecha_caducidad || '9999').localeCompare(String(b.fecha_caducidad || '9999')))[0];
+                    if (lote) { altSku = String(lote.sku); altAuto = true; autoCant = Math.min(falta, disp[altSku]); }
+                }
+                const prodAlt = altSku ? state.inventario.find(p => String(p.sku) === altSku) || null : null;
+                const pedida = altSku ? (altAuto ? autoCant : (f.altCantPedida ?? Math.max(1, falta))) : 0;
+                const altCant = altSku ? Math.min(pedida, f.listo ? f.llevar : f.planLlevar) : 0;
+                const altPlan = altSku ? Math.min(pedida, f.planLlevar) : 0;
+                const altUsa = f.listo ? altCant : altPlan;
+                // Lo que se descuenta del lote del espacio = lo que entra menos lo que vino de otro lote
+                disp[f.skuEntra] = (disp[f.skuEntra] || 0) - Math.max(0, necesita - altUsa);
+                if (altSku) disp[altSku] = (disp[altSku] || 0) - altUsa;
+                const otrosLotes = propio ? state.inventario.filter(p => String(p.sku) !== f.skuEntra && claveProducto(p) === claveProducto(propio)) : [];
+                return { ...f, altSku, altAuto, prodAlt, nombreAlt: prodAlt ? prodAlt.nombre_producto : (altSku || ''),
+                    altCant, altPlan, necesita, bodegaLote: usaPropio, faltaBodega: falta,
+                    faltaFinal: Math.max(0, necesita - Math.min(necesita, usaPropio + altUsa)), otrosLotes };
+            });
         }
 
         // Productos a sacar de bodega. Si un producto sale de un espacio (cambio de lugar) y entra en otro,
@@ -2529,7 +2540,7 @@
                                             ${f.llevar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-800">entran ${f.llevar}</span>` : ''}
                                             ${f.retirar ? `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-200 text-gray-800">salen ${f.retirar}</span>` : ''}
                                             <button type="button" onclick="window.repoSet('${f.e}', 'cambiando', ${f.abierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.cambio ? 'Editar reemplazo' : 'Reemplazar producto'}</button>
-                                            <button type="button" onclick="window.repoSet('${f.e}', 'altAbierto', ${f.altAbierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.altSku ? `${f.altAuto ? 'Sugerido: ' : ''}${(f.altCant || f.altPlan) ? `${f.altCant || f.altPlan} de ${esc(f.nombreAlt)}` : `desde ${esc(f.nombreAlt)}`}` : 'Agregué de otro lote o producto'}</button>
+                                            <button type="button" onclick="window.repoSet('${f.e}', 'altAbierto', ${f.altAbierto ? 'false' : 'true'})" class="text-xs font-semibold text-blue-700 underline">${f.altSku ? `${f.altAuto ? 'Sugerido: ' : ''}${(f.altCant || f.altPlan) ? `${f.altCant || f.altPlan} de ${esc(nombreLote(f.altSku))}` : `desde ${esc(nombreLote(f.altSku))}`}` : 'Agregué de otro lote o producto'}</button>
                                         </div>
                                         ${f.abierto || f.cambio ? `
                                             <div class="mt-2 p-3 bg-blue-50 border border-blue-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
@@ -2549,12 +2560,18 @@
                                                     ? `Precio anterior $${clp(f.precioActual)}. Encontré = unidades de ${esc(f.nombre)} que <strong>sacaste</strong>; Dejé = unidades de ${esc(f.nombreNuevo)}. Cambia también el precio en la máquina.${f.prodNuevo && f.prod && claveProducto(f.prodNuevo) === claveProducto(f.prod) && f.encontrado > 0 ? ' <span class="text-amber-800 font-semibold">Es otro lote del mismo producto: si los que había siguen en la máquina, usa "Agregué de otro lote o producto" en vez de reemplazar.</span>' : ''}`
                                                     : 'Úsalo solo si <strong>sacaste</strong> los que había y pusiste otro producto. Si los que había siguen, usa "Agregué de otro lote o producto".'}</p>
                                             </div>` : ''}
-                                        ${f.altAbierto || (f.altSku && (!f.altAuto || f.listo)) ? `
+                                        ${f.listo && f.faltaBodega > 0 ? `
+                                            <div class="mt-2 p-3 bg-red-50 border-2 border-red-300 rounded text-sm text-red-900" role="alert">
+                                                <strong>⚠️ En bodega solo hay ${f.bodegaLote} de ${esc(nombreLote(f.skuEntra))}</strong> y entran ${f.necesita}. ¿Sacaste ${f.faltaBodega === 1 ? 'la otra' : `las otras ${f.faltaBodega}`} de otro lote? Elige el lote y la cantidad abajo.
+                                                ${f.faltaFinal > 0 ? `<div class="mt-1 font-semibold">Todavía faltan ${f.faltaFinal} por asignar a un lote: si no, la bodega quedará negativa.</div>` : ''}
+                                            </div>` : ''}
+                                        ${f.altAbierto || (f.altSku && (!f.altAuto || f.listo)) || (f.listo && f.faltaBodega > 0) ? `
                                             <div class="mt-2 p-3 bg-amber-50 border border-amber-200 rounded grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2 items-end">
-                                                <label class="text-xs text-gray-700 font-semibold min-w-0">Las unidades nuevas salieron de
+                                                <label class="text-xs text-gray-700 font-semibold min-w-0">${f.otrosLotes.length ? 'Lote del que sacaste' : 'Las unidades nuevas salieron de'}
                                                     <select id="repoAlt-${f.e}" onchange="window.repoSetAlt('${f.e}', this.value)" class="block w-full max-w-full min-w-0 border p-2 rounded text-base font-normal bg-white">
                                                         <option value="">— Solo de ${esc(nombreBase(f.nombreNuevo || f.nombre))} —</option>
-                                                        ${opcionesProducto.filter(p => String(p.sku) !== f.skuEntra).map(p => `<option value="${esc(p.sku)}" ${String(p.sku) === f.altSku ? 'selected' : ''}>${esc(p.nombre_producto)} · bodega ${Number(p.cantidad_actual) || 0}</option>`).join('')}
+                                                        ${f.otrosLotes.length ? `<optgroup label="Otros lotes de ${esc(nombreBase(f.nombreNuevo || f.nombre))}">${f.otrosLotes.map(p => `<option value="${esc(p.sku)}" ${String(p.sku) === f.altSku ? 'selected' : ''}>${esc(nombreBase(p.nombre_producto))} · vence ${p.fecha_caducidad ? fmtFecha(p.fecha_caducidad) : 's/f'} · bodega ${Number(p.cantidad_actual) || 0}</option>`).join('')}</optgroup>` : ''}
+                                                        <optgroup label="Otro producto">${opcionesProducto.filter(p => String(p.sku) !== f.skuEntra && !f.otrosLotes.some(o => String(o.sku) === String(p.sku))).map(p => `<option value="${esc(p.sku)}" ${String(p.sku) === f.altSku ? 'selected' : ''}>${esc(p.nombre_producto)} · bodega ${Number(p.cantidad_actual) || 0}</option>`).join('')}</optgroup>
                                                     </select>
                                                 </label>
                                                 ${f.altSku ? `
@@ -2564,7 +2581,7 @@
                                                     <button type="button" onclick="window.repoSetAlt('${f.e}', '')" class="px-3 py-2 rounded border border-gray-300 text-sm font-semibold bg-white">Quitar</button>
                                                 ` : ''}
                                                 <p class="text-xs text-gray-600 sm:col-span-3">${f.altSku
-                                                    ? (!(f.listo ? f.llevar : f.planLlevar) ? 'Todavía no entra ninguna unidad en este espacio: marca Repuse o escribe Dejé.' : `De las ${f.listo ? f.llevar : f.planLlevar} que entran, ${f.altCant || f.altPlan} se descuentan de <strong>${esc(f.nombreAlt)}</strong> y ${Math.max(0, (f.listo ? f.llevar : f.planLlevar) - (f.altCant || f.altPlan))} de <strong>${esc(f.nombreNuevo || f.nombre)}</strong>. El espacio sigue asignado a ${esc(f.nombreNuevo || f.nombre)}.`)
+                                                    ? (!(f.listo ? f.llevar : f.planLlevar) ? 'Todavía no entra ninguna unidad en este espacio: marca Repuse o escribe Dejé.' : `De las ${f.listo ? f.llevar : f.planLlevar} que entran, ${f.altCant || f.altPlan} se descuentan de <strong>${esc(nombreLote(f.altSku))}</strong> y ${Math.max(0, (f.listo ? f.llevar : f.planLlevar) - (f.altCant || f.altPlan))} de <strong>${esc(nombreLote(f.skuEntra))}</strong>. El espacio sigue asignado a ${esc(f.nombreNuevo || f.nombre)}.`)
                                                     : 'Úsalo cuando los que había siguen en la máquina y agregaste unidades de otro lote o de un producto parecido.'}${f.altAuto ? ' <strong>Sugerido</strong> porque el lote del espacio no alcanza en bodega; si no es así, cámbialo o quítalo.' : ''}</p>
                                             </div>` : ''}
                                     </div>
@@ -2655,17 +2672,19 @@
         window.toggleCompraVerTodos = function() { state.compraVerTodos = !state.compraVerTodos; render(); };
 
         function nombreBase(n) { return String(n || '').split('·')[0].trim(); }
-        function normNombre(n) { return nombreBase(n).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+        function normNombre(n) { return nombreBase(n).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+        // v18: lotes del mismo producto = mismo nombre (sin la parte "· vence …") o confirmados en MISMO_PRODUCTO.
+        // Antes solo se reconocían los SKU terminados en -L2/-L3 y no los "V2" (p. ej. GB-LIMON-SODA-ZEROV2).
+        function nombreLote(sku) {
+            const p = state.inventario.find(x => String(x.sku) === String(sku));
+            if (!p) return String(sku || '');
+            return nombreBase(p.nombre_producto) + (p.fecha_caducidad ? ` (vence ${fmtFecha(p.fecha_caducidad)})` : '');
+        }
         function claveProducto(p) {
             if (!p) return '';
-            const sku = String(p.sku);
-            if (MISMO_PRODUCTO[sku]) return MISMO_PRODUCTO[sku];
-            const base = sku.replace(/-L\d+$/, '');
-            if (base !== sku) {
-                const madre = state.inventario.find(x => String(x.sku) === base);
-                if (madre && normNombre(madre.nombre_producto) === normNombre(p.nombre_producto)) return base;
-            }
-            return sku;
+            const canon = MISMO_PRODUCTO[String(p.sku)];
+            const ref = canon ? (state.inventario.find(x => String(x.sku) === canon) || p) : p;
+            return 'N:' + normNombre(ref.nombre_producto);
         }
 
         // Producto vendido según el espacio y la hora (usa los cambios registrados en reposiciones)
@@ -5301,7 +5320,7 @@
                     </nav>
 
                     <footer class="app-footer bg-gray-900 text-white text-center py-6 mt-12">
-                        <div>GO BOX Dashboard v17 | Concepción, Chile 🇨🇱</div>
+                        <div>GO BOX Dashboard v18 | Concepción, Chile 🇨🇱</div>
                     </footer>
                 </div>
 
