@@ -246,6 +246,8 @@
             asignaciones: [],
             maquinas: [],
             historial: [],
+            ultimaImport: null,      // última fila IMPORTAR_VENTAS de historial_cambios {ts, usuario, detalles}
+            importNueva: null,       // importación hecha después de cargar los datos (aviso "Actualizar")
             reposiciones: [],        // tabla reposiciones (ver reposiciones_v1.sql)
             reposicionesOk: false,   // false si la tabla aún no existe en Supabase
             repoMaquina: '',         // máquina elegida en la pestaña Reponer
@@ -506,6 +508,8 @@
                 { id: 'a3', maquina_id: '6ba7b810-9dad-11d1-80b4-00c04fd430c8', espacio: '33', sku: 'SKU002', cantidad_asignada: 8, productos_por_slot: 1, precio_venta_espacio: 2200 }
             ];
             state.historial = [];
+            state.ultimaImport = { ts: new Date(Date.now() - 40 * 60000).toISOString(), usuario: 'importación automática (Gmail)', detalles: 'Ventas demo.xlsx: 2 transacciones nuevas' };
+            state.importNueva = null;
             state.reposiciones = [];
             state.reposicionesOk = true;
             console.log('✅ Datos de ejemplo cargados correctamente');
@@ -632,7 +636,71 @@
                 .limit(100);
             if (error) { console.warn('Historial no disponible:', error.message); state.historial = []; return false; }
             state.historial = (data || []).map(h => ({ timestamp: h.created_at, usuario: h.usuario, accion: h.accion, detalles: h.detalles }));
+            const ult = await fetchUltimaImport();
+            if (ult !== undefined) { state.ultimaImport = ult; state.importNueva = null; }
             return true;
+        }
+
+        // Última importación de ventas (manual o automática desde Gmail). undefined = no se pudo consultar.
+        async function fetchUltimaImport() {
+            const { data, error } = await supabaseClient
+                .from('historial_cambios')
+                .select('created_at, usuario, detalles')
+                .eq('accion', 'IMPORTAR_VENTAS')
+                .order('created_at', { ascending: false })
+                .limit(1);
+            if (error) { console.warn('Última importación no disponible:', error.message); return undefined; }
+            const h = (data || [])[0];
+            return h ? { ts: h.created_at, usuario: h.usuario, detalles: h.detalles } : null;
+        }
+
+        // Mientras la app está abierta, revisa cada 3 min si entró una importación nueva (p. ej. la automática de Gmail)
+        setInterval(async () => {
+            if (!state.session || state.demoMode || state.loading || document.hidden) return;
+            const ult = await fetchUltimaImport();
+            if (!ult) return;
+            const conocida = state.ultimaImport ? state.ultimaImport.ts : '';
+            if (new Date(ult.ts) > new Date(conocida || 0) && (!state.importNueva || state.importNueva.ts !== ult.ts)) {
+                state.importNueva = ult;
+                render();
+            }
+        }, 180000);
+
+        // Texto del aviso de importación: "hoy a las 21:02", "ayer a las 9:15", "el 12-10 a las 18:40"
+        function textoCuandoImport(ts) {
+            const d = new Date(ts);
+            const hora = d.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit', hour12: false });
+            const f = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            if (f === fechaLocal()) return `hoy a las ${hora}`;
+            if (f === fechaLocal(-1)) return `ayer a las ${hora}`;
+            return `el ${f.substring(8, 10)}-${f.substring(5, 7)} a las ${hora}`;
+        }
+
+        function renderAvisoImport() {
+            const nueva = state.importNueva;
+            const u = nueva || state.ultimaImport;
+            if (!u) return '';
+            const auto = /autom/i.test(u.usuario || '');
+            const m = String(u.detalles || '').match(/(\d+) transacciones nuevas/);
+            const n = m ? Number(m[1]) : null;
+            const nTxt = n === null ? '' : ` · ${n === 0 ? 'sin ventas nuevas' : n === 1 ? '1 venta nueva' : n + ' ventas nuevas'}`;
+            const horas = (Date.now() - new Date(u.ts).getTime()) / 3600000;
+            if (nueva) {
+                return `
+                <div class="bg-blue-50 border-b border-blue-200 text-blue-900 text-sm px-4 py-2" role="status">
+                    <div class="max-w-7xl mx-auto flex items-center justify-between gap-2">
+                        <span>📥 Llegaron datos nuevos ${esc(textoCuandoImport(u.ts))}${auto ? ' (automático)' : ''}${esc(nTxt)}</span>
+                        <button onclick="window.fetchAllData()" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg font-semibold text-xs whitespace-nowrap">Actualizar</button>
+                    </div>
+                </div>`;
+            }
+            const viejo = horas > 24;
+            return `
+                <div class="${viejo ? 'bg-amber-50 border-amber-200 text-amber-900' : 'bg-green-50 border-green-200 text-green-900'} border-b text-sm px-4 py-2" role="status">
+                    <div class="max-w-7xl mx-auto">
+                        ${viejo ? '⚠️' : '✅'} Datos importados ${esc(textoCuandoImport(u.ts))}${auto ? ' (automático)' : ''}${esc(nTxt)}${viejo ? ' · pide el reporte en PayScan' : ''}
+                    </div>
+                </div>`;
         }
 
         // Reposiciones registradas desde la pestaña Reponer. Si la tabla aún no existe (falta correr
@@ -674,7 +742,7 @@
         }
 
         function limpiarDatos() {
-            state.ventas = []; state.inventario = []; state.asignaciones = []; state.maquinas = []; state.historial = [];
+            state.ventas = []; state.inventario = []; state.asignaciones = []; state.maquinas = []; state.historial = []; state.ultimaImport = null; state.importNueva = null;
             state.reposiciones = []; state.reposicionesOk = false; state.repoMaquina = ''; state.repoDraft = null; state.repoError = '';
             state.repoBodegaRepId = ''; state.repoDevuelve = {}; state.repoBodegaError = '';
             state.selectedMachineForAssignment = null; state.editingMachine = null; state.editingProduct = null;
@@ -3539,6 +3607,8 @@
                     insertadas += lote.length;
                 }
                 guardarHistorial('IMPORTAR_VENTAS', `${prev.archivo}: ${insertadas} transacciones nuevas (${fmtFecha(prev.desde)} al ${fmtFecha(prev.hasta)})`);
+                state.ultimaImport = { ts: new Date().toISOString(), usuario: state.currentUser, detalles: `${insertadas} transacciones nuevas` };
+                state.importNueva = null;
                 state.importLoading = false;
                 state.showImportModal = false;
                 state.importPreview = null;
@@ -5287,6 +5357,7 @@
                         </div>
                     </header>
 
+                    ${renderAvisoImport()}
                     ${state.demoMode ? `
                         <div class="bg-yellow-100 border-b border-yellow-300 text-yellow-900 text-sm text-center py-2 px-4">
                             ⚠️ Modo demo: datos de ejemplo, los cambios no se guardan.
